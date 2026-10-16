@@ -1,17 +1,18 @@
-node_modules
-# Keep environment variables out of version control
+# Dependencies
+node_modules/
+
+# Environment and Secrets (Never commit credentials!)
 .env
 *.env
 *.env.*
-
-/src/generated/prisma
-dist
-build
-*.log
-
-# Firebase Service Account Credentials (Never commit private keys!)
 firebase-service-account.json
 *service-account*.json
+
+# Generated and Build Output
+/src/generated/prisma
+dist/
+build/
+*.log
 
 # IDE & Editor cache
 .idea/
@@ -28,3 +29,6 @@ firebase-service-account.json
 prisma7.config.js
 prisma7.config.js.map
 
+# OS files
+.DS_Store
+Thumbs.db
