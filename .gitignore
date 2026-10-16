@@ -1,0 +1,30 @@
+node_modules
+# Keep environment variables out of version control
+.env
+*.env
+*.env.*
+
+/src/generated/prisma
+dist
+build
+*.log
+
+# Firebase Service Account Credentials (Never commit private keys!)
+firebase-service-account.json
+*service-account*.json
+
+# IDE & Editor cache
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# AI Agent & Assistant folders
+.agents/
+.claude/
+.windsurf/
+
+# Compiled Prisma config artifacts
+prisma7.config.js
+prisma7.config.js.map
+

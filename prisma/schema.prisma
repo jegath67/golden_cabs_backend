@@ -1,0 +1,500 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// -------------------------------------------------------------
+// ENUMS
+// -------------------------------------------------------------
+
+enum UserRole {
+  CUSTOMER
+  DRIVER
+  ADMIN
+  DISPATCHER
+}
+
+enum DriverPersona {
+  DRIVE_ONLY
+  OWN_VEHICLE
+  RENTAL
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum ShiftStatus {
+  ON_SHIFT
+  OFF_SHIFT
+}
+
+enum VehicleStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+  MAINTENANCE
+}
+
+enum VehicleType {
+  SEDAN
+  SUV
+  HATCHBACK
+  LUXURY
+  AUTO
+}
+
+enum VehicleCategory {
+  BUDGET
+  PREMIUM
+  LUXURY
+}
+
+enum FuelType {
+  PETROL
+  DIESEL
+  ELECTRIC
+  CNG
+}
+
+enum GearType {
+  MANUAL
+  AUTOMATIC
+}
+
+enum TripType {
+  DAILY
+  RENTAL
+  OUTSTATION
+  ONE_WAY
+  ROUND_TRIP
+}
+
+enum TripStatus {
+  SEARCHING
+  ACCEPTED
+  EN_ROUTE
+  ARRIVED
+  ONGOING
+  COMPLETED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  UPI
+  CARD
+  WALLET
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  REFUNDED
+}
+
+enum DiscountType {
+  FLAT
+  PERCENTAGE
+}
+
+enum WalletTxType {
+  EARNING
+  WITHDRAWAL
+  COMMISSION
+  ADJUSTMENT
+  BONUS
+}
+
+enum WalletTxStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+enum RefundStatus {
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  REFUNDED
+  REJECTED
+}
+
+// -------------------------------------------------------------
+// USER & PROFILES
+// -------------------------------------------------------------
+
+model User {
+  id           String    @id @default(uuid())
+  phone        String    @unique
+  email        String?   @unique
+  name         String
+  passwordHash String?
+  role         UserRole  @default(CUSTOMER)
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  // Relationships
+  customerProfile CustomerProfile?
+  driverProfile   DriverProfile?
+  notifications   Notification[]
+  deviceTokens    DeviceToken[]
+  savedCars       SavedCar[]
+  ridesAsCustomer   Ride[]          @relation("CustomerRides")
+  refundRequests    RefundRequest[]
+  customerWallet    CustomerWallet?
+  reviewsAsCustomer Review[]        @relation("CustomerReviews")
+}
+
+model CustomerProfile {
+  id               String   @id @default(uuid())
+  userId           String   @unique
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gender           String?
+  dob              String?
+  address          String?
+  emergencyContact String?
+  rating           Float    @default(5.0)
+  totalRides       Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model DriverProfile {
+  id                String         @id @default(uuid())
+  userId            String         @unique
+  user              User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  personaType       DriverPersona  @default(DRIVE_ONLY)
+  licenseNumber     String?
+  licenseExpiry     String?
+  licenseFront      String?
+  licenseBack       String?
+  aadharNumber      String?
+  aadharFront       String?
+  aadharBack        String?
+  panNumber         String?
+  panImage          String?
+  selfieImage       String?
+  approvalStatus    ApprovalStatus @default(PENDING)
+  rejectionReason   String?
+  isOnline          Boolean        @default(false)
+  shiftStatus       ShiftStatus    @default(OFF_SHIFT)
+  currentLatitude   Float?
+  currentLongitude  Float?
+  rating            Float          @default(5.0)
+  totalRides        Int            @default(0)
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  // Stand / Hub assignment for driveOnly persona
+  assignedHubId     String?
+  assignedHub       Hub?           @relation(fields: [assignedHubId], references: [id])
+
+  // Temporarily allocated vehicle for driveOnly persona
+  assignedVehicleId String?        @unique
+  assignedVehicle   Vehicle?       @relation("DriverAssignedVehicle", fields: [assignedVehicleId], references: [id])
+
+  // Vehicles owned by this partner (ownVehicle / rental persona)
+  ownedVehicles     Vehicle[]      @relation("OwnerVehicles")
+
+  // Operations & Finance
+  rides             Ride[]         @relation("DriverRides")
+  wallet            Wallet?
+  reviews           Review[]       @relation("DriverReviews")
+}
+
+// -------------------------------------------------------------
+// HUBS (TAXI STANDS & GEOFENCING)
+// -------------------------------------------------------------
+
+model Hub {
+  id                String          @id @default(uuid())
+  name              String
+  latitude          Float
+  longitude         Float
+  radiusMeters      Float           @default(500.0)
+  city              String          @default("Puducherry")
+  isActive          Boolean         @default(true)
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  assignedDrivers   DriverProfile[]
+  stationedVehicles Vehicle[]
+}
+
+// -------------------------------------------------------------
+// VEHICLE & FLEET
+// -------------------------------------------------------------
+
+model Vehicle {
+  id              String          @id @default(uuid())
+  vehicleNumber   String          @unique
+  brand           String
+  model           String
+  year            Int
+  vehicleType     VehicleType     @default(SEDAN)
+  category        VehicleCategory @default(BUDGET)
+  fuelType        FuelType        @default(PETROL)
+  gearType        GearType        @default(MANUAL)
+  seatCapacity    Int             @default(4)
+  pricePerKm      Float           @default(14.0)
+  basePrice       Float           @default(0.0)
+  acAvailable     Boolean         @default(true)
+  luggageCapacity Boolean         @default(true)
+  rcNumber        String?
+  rcExpiry        String?
+  rcFront         String?
+  rcBack          String?
+  insuranceNumber String?
+  insuranceExpiry String?
+  insuranceDoc    String?
+  status          VehicleStatus   @default(PENDING)
+  isOnline        Boolean         @default(false)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  // Fleet Owner / Vendor relationship (for rental / ownVehicle)
+  ownerId         String?
+  owner           DriverProfile?  @relation("OwnerVehicles", fields: [ownerId], references: [id])
+
+  // DriveOnly live assignment
+  assignedDriver  DriverProfile?  @relation("DriverAssignedVehicle")
+
+  // Stationed Stand / Hub
+  assignedHubId   String?
+  assignedHub     Hub?            @relation(fields: [assignedHubId], references: [id])
+
+  photos          VehiclePhoto[]
+  rides           Ride[]
+  savedByUsers    SavedCar[]
+}
+
+model VehiclePhoto {
+  id        String   @id @default(uuid())
+  vehicleId String
+  vehicle   Vehicle  @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  photoUrl  String
+  tag       String?  // front, back, left, right, interior
+  createdAt DateTime @default(now())
+}
+
+// -------------------------------------------------------------
+// RIDES & BOOKINGS
+// -------------------------------------------------------------
+
+model Ride {
+  id             String        @id @default(uuid())
+  bookingCode    String        @unique // e.g. GC-123456
+  customerId     String
+  customer       User          @relation("CustomerRides", fields: [customerId], references: [id])
+  driverId       String?
+  driver         DriverProfile? @relation("DriverRides", fields: [driverId], references: [id])
+  vehicleId      String?
+  vehicle        Vehicle?      @relation(fields: [vehicleId], references: [id])
+  tripType       TripType      @default(DAILY)
+  status         TripStatus    @default(SEARCHING)
+  pickupLocation String
+  pickupAddress  String?
+  pickupLat      Float
+  pickupLng      Float
+  dropLocation   String
+  dropAddress    String?
+  dropLat        Float
+  dropLng        Float
+  stops          Json?         // list of intermediate stops
+  distanceKm     Float
+  estimatedFare  Float
+  finalFare      Float?
+  startOtp       String        // OTP for starting trip
+  paymentMethod  PaymentMethod @default(CASH)
+  paymentStatus  PaymentStatus @default(PENDING)
+  cancelReason   String?
+  cancelledBy    String?       // customer, driver, admin, timeout
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  fareBreakdown  FareBreakdown?
+  refundRequest  RefundRequest?
+  review         Review?
+}
+
+model FareBreakdown {
+  id             String   @id @default(uuid())
+  rideId         String   @unique
+  ride           Ride     @relation(fields: [rideId], references: [id], onDelete: Cascade)
+  distanceKm     Float
+  pricePerKm     Float
+  baseFare       Float    @default(0.0)
+  tollCharge     Float    @default(0.0)
+  permitCharge   Float    @default(0.0)
+  driverBata     Float    @default(0.0)
+  discountAmount Float    @default(0.0)
+  totalFare      Float
+}
+
+model Coupon {
+  id             String       @id @default(uuid())
+  code           String       @unique
+  description    String?
+  discountType   DiscountType @default(FLAT)
+  discountValue  Float
+  minOrderAmount Float        @default(0.0)
+  maxDiscount    Float?
+  validUntil     DateTime?
+  usageLimit     Int?
+  timesUsed      Int          @default(0)
+  isActive       Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+}
+
+// -------------------------------------------------------------
+// WALLET & FINANCIAL LEDGER
+// -------------------------------------------------------------
+
+model Wallet {
+  id                 String              @id @default(uuid())
+  driverId           String              @unique
+  driver             DriverProfile       @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  balance            Float               @default(0.0)
+  lifetimeEarnings   Float               @default(0.0)
+  pendingWithdrawals Float               @default(0.0)
+  bankAccountNumber  String?
+  bankIfsc           String?
+  bankHolderName     String?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  transactions       WalletTransaction[]
+}
+
+model WalletTransaction {
+  id              String         @id @default(uuid())
+  walletId        String
+  wallet          Wallet         @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  amount          Float
+  type            WalletTxType
+  status          WalletTxStatus @default(PENDING)
+  description     String
+  referenceRideId String?
+  createdAt       DateTime       @default(now())
+}
+
+model RefundRequest {
+  id           String       @id @default(uuid())
+  rideId       String       @unique
+  ride         Ride         @relation(fields: [rideId], references: [id], onDelete: Cascade)
+  customerId   String
+  customer     User         @relation(fields: [customerId], references: [id])
+  reason       String
+  amount       Float
+  status       RefundStatus @default(SUBMITTED)
+  adminRemarks String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+}
+
+// -------------------------------------------------------------
+// CUSTOMER WISHLIST (SAVED CARS)
+// -------------------------------------------------------------
+
+model SavedCar {
+  id         String   @id @default(uuid())
+  customerId String
+  customer   User     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  vehicleId  String
+  vehicle    Vehicle  @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@unique([customerId, vehicleId])
+}
+
+// -------------------------------------------------------------
+// NOTIFICATIONS & PUSH TOKENS
+// -------------------------------------------------------------
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  message   String
+  type      String   @default("general") // offer, verified, warning, wallet, reward
+  data      Json?
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model DeviceToken {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fcmToken   String   @unique
+  platform   String   @default("android") // android, ios, web
+  isActive   Boolean  @default(true)
+  lastUsedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+// -------------------------------------------------------------
+// CUSTOMER WALLET & REFUND LEDGER
+// -------------------------------------------------------------
+
+enum CustomerWalletTxType {
+  REFUND
+  PAYMENT
+  TOPUP
+  ADJUSTMENT
+}
+
+model CustomerWallet {
+  id           String                      @id @default(uuid())
+  customerId   String                      @unique
+  customer     User                        @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  balance      Float                       @default(0.0)
+  createdAt    DateTime                    @default(now())
+  updatedAt    DateTime                    @updatedAt
+
+  transactions CustomerWalletTransaction[]
+}
+
+model CustomerWalletTransaction {
+  id                String               @id @default(uuid())
+  walletId          String
+  wallet            CustomerWallet       @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  amount            Float
+  type              CustomerWalletTxType
+  status            WalletTxStatus       @default(COMPLETED)
+  description       String
+  referenceRefundId String?              @unique
+  referenceRideId   String?
+  createdAt         DateTime             @default(now())
+}
+
+model Review {
+  id          String        @id @default(uuid())
+  rideId      String        @unique
+  ride        Ride          @relation(fields: [rideId], references: [id], onDelete: Cascade)
+  customerId  String
+  customer    User          @relation("CustomerReviews", fields: [customerId], references: [id], onDelete: Cascade)
+  driverId    String
+  driver      DriverProfile @relation("DriverReviews", fields: [driverId], references: [id], onDelete: Cascade)
+  rating      Float         @default(5.0)
+  comment     String?
+  tags        String[]      @default([])
+  cleanliness String?
+  punctuality String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+}
+
+
