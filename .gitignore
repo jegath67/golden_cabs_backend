@@ -29,6 +29,5 @@ build/
 prisma7.config.js
 prisma7.config.js.map
 
-# OS files
-.DS_Store
-Thumbs.db
+# Scratch / local debug
+scratch/

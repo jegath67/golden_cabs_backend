@@ -1,4 +1,5 @@
 import { prisma } from '../../config/prisma';
+import { notificationsService } from '../notifications/notifications.service';
 
 export class VehiclesService {
   async getAllVehicles(filters?: {
@@ -89,7 +90,42 @@ export class VehiclesService {
 
   async assignVehicleToDriver(vehicleId: string, driverProfileId: string | null) {
     if (!driverProfileId) {
-      // Unassign
+      // Unassign driver from vehicle
+      const existingVehicle = await prisma.vehicle.findUnique({
+        where: { id: vehicleId },
+        include: {
+          assignedDriver: {
+            include: { user: true },
+          },
+        },
+      });
+
+      if (existingVehicle?.assignedDriver) {
+        // Automatically put driver off shift when vehicle is unassigned
+        await prisma.driverProfile.update({
+          where: { id: existingVehicle.assignedDriver.id },
+          data: {
+            isOnline: false,
+            shiftStatus: 'OFF_SHIFT',
+          },
+        });
+
+        // Send notification to the driver
+        if (existingVehicle.assignedDriver.userId) {
+          await notificationsService.sendToUser({
+            userId: existingVehicle.assignedDriver.userId,
+            title: '🚗 Vehicle De-allocated',
+            message: `${existingVehicle.brand} ${existingVehicle.model} (${existingVehicle.vehicleNumber}) has been unassigned. Please request a new vehicle from Hub to go online.`,
+            type: 'vehicle_unassignment',
+            data: {
+              vehicleId: existingVehicle.id,
+              vehicleNumber: existingVehicle.vehicleNumber,
+            },
+            saveToDb: true,
+          }).catch((err) => console.error('Error notifying driver of unassignment:', err));
+        }
+      }
+
       return prisma.vehicle.update({
         where: { id: vehicleId },
         data: {
@@ -100,14 +136,72 @@ export class VehiclesService {
       });
     }
 
-    return prisma.vehicle.update({
+    // 1. Fetch target driver
+    const driver = await prisma.driverProfile.findUnique({
+      where: { id: driverProfileId },
+      include: {
+        user: true,
+        assignedVehicle: true,
+      },
+    });
+
+    if (!driver) {
+      throw new Error('Driver profile not found');
+    }
+
+    // 2. If driver was previously assigned to a different vehicle, disconnect that old vehicle
+    if (driver.assignedVehicleId && driver.assignedVehicleId !== vehicleId) {
+      await prisma.vehicle.update({
+        where: { id: driver.assignedVehicleId },
+        data: {
+          assignedDriver: {
+            disconnect: true,
+          },
+        },
+      });
+    }
+
+    // 3. Connect this vehicle to the driver
+    const updated = await prisma.vehicle.update({
       where: { id: vehicleId },
       data: {
         assignedDriver: {
           connect: { id: driverProfileId },
         },
       },
+      include: {
+        assignedDriver: {
+          include: {
+            user: { select: { id: true, name: true, phone: true } },
+          },
+        },
+      },
     });
+
+    // 4. Mark any pending VehicleRequest for this driver as ASSIGNED
+    await prisma.$executeRawUnsafe(
+      `UPDATE "VehicleRequest" SET "status" = 'ASSIGNED', "assignedVehicleId" = $1, "updatedAt" = NOW() WHERE "driverProfileId" = $2 AND "status" = 'PENDING'`,
+      vehicleId,
+      driverProfileId
+    ).catch((err) => console.error('Error updating VehicleRequest status:', err));
+
+    // 5. Send push notification & in-app inbox notification to the driver
+    if (driver.userId) {
+      await notificationsService.sendToUser({
+        userId: driver.userId,
+        title: '🚗 Vehicle Assigned!',
+        message: `${updated.brand} ${updated.model} (${updated.vehicleNumber}) has been allocated to you. You can now go online.`,
+        type: 'vehicle_assignment',
+        data: {
+          vehicleId: updated.id,
+          vehicleNumber: updated.vehicleNumber,
+          vehicleName: `${updated.brand} ${updated.model}`,
+        },
+        saveToDb: true,
+      }).catch((err) => console.error('Error notifying driver of assignment:', err));
+    }
+
+    return updated;
   }
 }
 

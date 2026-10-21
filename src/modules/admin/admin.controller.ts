@@ -21,7 +21,7 @@ export class AdminController {
       const formatted = customers.map((u) => {
         const regDate = u.createdAt ? u.createdAt.toISOString().split('T')[0] : '';
         const lastActiveDate = u.updatedAt ? u.updatedAt.toISOString().replace('T', ' ').substring(0, 16) : '';
-        
+
         return {
           id: u.id,
           name: u.name || 'Customer',
@@ -493,6 +493,113 @@ export class AdminController {
         message: 'Failed to assign driver',
         error: String(error),
       });
+    }
+  }
+
+  async getSubAdmins(req: FastifyRequest, reply: FastifyReply) {
+    try {
+      const admins = await prisma.user.findMany({
+        where: {
+          role: { in: ['ADMIN', 'ZONE_ADMIN', 'SUPER_ADMIN', 'DISPATCHER'] },
+        },
+        select: {
+          id: true,
+          name: true,
+          phone: true,
+          email: true,
+          role: true,
+          isActive: true,
+          assignedZoneId: true,
+          assignedZone: true,
+          createdAt: true,
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      return reply.send({ success: true, data: admins });
+    } catch (error: any) {
+      return reply.status(500).send({ success: false, message: 'Failed to fetch sub-admins', error: error.message });
+    }
+  }
+
+  async createSubAdmin(req: FastifyRequest, reply: FastifyReply) {
+    try {
+      const { name, phone, email, password, role = 'ZONE_ADMIN', assignedZoneId } = (req.body as any) || {};
+
+      if (!name || !phone || !password) {
+        return reply.status(400).send({ success: false, message: 'Name, phone, and password are required' });
+      }
+
+      const existing = await prisma.user.findFirst({
+        where: {
+          OR: [{ phone }, ...(email ? [{ email: email.toLowerCase() }] : [])],
+        },
+      });
+
+      if (existing) {
+        return reply.status(400).send({ success: false, message: 'An admin or user with this phone/email already exists' });
+      }
+
+      const bcrypt = require('bcryptjs');
+      const passwordHash = await bcrypt.hash(password, 10);
+
+      const created = await prisma.user.create({
+        data: {
+          name,
+          phone,
+          email: email ? email.toLowerCase() : null,
+          passwordHash,
+          role: role as any,
+          assignedZoneId: assignedZoneId || null,
+        },
+        select: {
+          id: true,
+          name: true,
+          phone: true,
+          email: true,
+          role: true,
+          assignedZoneId: true,
+          assignedZone: true,
+          createdAt: true,
+        },
+      });
+
+      return reply.status(201).send({ success: true, message: 'Admin account created successfully', data: created });
+    } catch (error: any) {
+      return reply.status(400).send({ success: false, message: error.message || 'Failed to create sub-admin' });
+    }
+  }
+
+  async updateSubAdmin(req: FastifyRequest, reply: FastifyReply) {
+    try {
+      const { id } = req.params as { id: string };
+      const { name, phone, email, role, isActive, assignedZoneId } = (req.body as any) || {};
+
+      const updated = await prisma.user.update({
+        where: { id },
+        data: {
+          ...(name ? { name } : {}),
+          ...(phone ? { phone } : {}),
+          ...(email ? { email: email.toLowerCase() } : {}),
+          ...(role ? { role: role as any } : {}),
+          ...(isActive !== undefined ? { isActive: Boolean(isActive) } : {}),
+          ...(assignedZoneId !== undefined ? { assignedZoneId: assignedZoneId || null } : {}),
+        },
+        select: {
+          id: true,
+          name: true,
+          phone: true,
+          email: true,
+          role: true,
+          isActive: true,
+          assignedZoneId: true,
+          assignedZone: true,
+          createdAt: true,
+        },
+      });
+
+      return reply.send({ success: true, message: 'Admin account updated successfully', data: updated });
+    } catch (error: any) {
+      return reply.status(400).send({ success: false, message: error.message || 'Failed to update sub-admin' });
     }
   }
 }

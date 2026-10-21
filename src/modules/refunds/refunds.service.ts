@@ -23,13 +23,22 @@ export class RefundsService {
     }
 
     // 1. Fetch ride and verify ownership
-    const ride = await prisma.ride.findUnique({
-      where: { id: rideId },
-      include: {
-        customer: true,
-        refundRequest: true,
-      },
-    });
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rideId);
+    const ride = isUuid
+      ? await prisma.ride.findUnique({
+          where: { id: rideId },
+          include: {
+            customer: true,
+            refundRequest: true,
+          },
+        })
+      : await prisma.ride.findUnique({
+          where: { bookingCode: rideId },
+          include: {
+            customer: true,
+            refundRequest: true,
+          },
+        });
 
     if (!ride) {
       throw new Error('Ride not found');
@@ -98,8 +107,20 @@ export class RefundsService {
    * Get refund request details for a specific ride (for tracking status in customer app)
    */
   async getRefundByRideId(rideId: string, customerId?: string) {
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rideId);
+    let targetRideId = rideId;
+    if (!isUuid) {
+      const ride = await prisma.ride.findUnique({
+        where: { bookingCode: rideId },
+        select: { id: true },
+      });
+      if (ride) {
+        targetRideId = ride.id;
+      }
+    }
+
     const refund = await prisma.refundRequest.findUnique({
-      where: { rideId },
+      where: { rideId: targetRideId },
       include: {
         ride: {
           select: {

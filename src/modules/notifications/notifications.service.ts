@@ -396,6 +396,7 @@ export class NotificationsService {
 
     return {
       items,
+      notifications: items,
       total,
       unreadCount,
       page,

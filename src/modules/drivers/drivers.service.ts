@@ -2,7 +2,7 @@ import { prisma } from '../../config/prisma';
 
 export class DriversService {
   async getDriverByUserId(userId: string) {
-    return prisma.driverProfile.findUnique({
+    const driver = await prisma.driverProfile.findUnique({
       where: { userId },
       include: {
         user: { select: { id: true, name: true, phone: true, email: true } },
@@ -12,6 +12,32 @@ export class DriversService {
         wallet: true,
       },
     });
+
+    if (!driver) return null;
+
+    let isVehicleRequestPending = false;
+    let pendingVehicleRequest = null;
+
+    if (!driver.assignedVehicleId) {
+      try {
+        const pending = await prisma.$queryRawUnsafe<any[]>(
+          `SELECT * FROM "VehicleRequest" WHERE "driverProfileId" = $1 AND "status" = 'PENDING' ORDER BY "createdAt" DESC LIMIT 1`,
+          driver.id
+        );
+        if (pending && pending.length > 0) {
+          isVehicleRequestPending = true;
+          pendingVehicleRequest = pending[0];
+        }
+      } catch (err) {
+        // Table may be empty
+      }
+    }
+
+    return {
+      ...driver,
+      isVehicleRequestPending,
+      pendingVehicleRequest,
+    };
   }
 
   async updateKycDocuments(
@@ -56,11 +82,28 @@ export class DriversService {
 
   async toggleShift(userId: string, shiftStatus: 'ON_SHIFT' | 'OFF_SHIFT') {
     const isOnline = shiftStatus === 'ON_SHIFT';
+
+    const driver = await prisma.driverProfile.findUnique({
+      where: { userId },
+      include: { assignedVehicle: true },
+    });
+
+    if (!driver) {
+      throw new Error('Driver profile not found');
+    }
+
+    if (isOnline && driver.personaType === 'DRIVE_ONLY' && !driver.assignedVehicleId) {
+      throw new Error('Vehicle allocation required from Hub before starting shift and going online');
+    }
+
     return prisma.driverProfile.update({
       where: { userId },
       data: {
         shiftStatus,
         isOnline,
+      },
+      include: {
+        assignedVehicle: true,
       },
     });
   }
@@ -160,6 +203,86 @@ export class DriversService {
         user: true,
       },
     });
+  }
+
+  async requestVehicle(userId: string, notes?: string) {
+    const driver = await prisma.driverProfile.findUnique({
+      where: { userId },
+      include: { assignedVehicle: true, assignedHub: true, user: true },
+    });
+
+    if (!driver) {
+      throw new Error('Driver profile not found');
+    }
+
+    if (driver.assignedVehicleId) {
+      return {
+        alreadyAssigned: true,
+        vehicle: driver.assignedVehicle,
+        message: 'A vehicle is already allocated to your profile',
+      };
+    }
+
+    const pending = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT * FROM "VehicleRequest" WHERE "driverProfileId" = $1 AND "status" = 'PENDING' LIMIT 1`,
+      driver.id
+    ).catch(() => []);
+
+    if (pending && pending.length > 0) {
+      return {
+        success: true,
+        pending: true,
+        message: 'Vehicle request already submitted to Hub and waiting for admin allocation',
+        request: pending[0],
+      };
+    }
+
+    const requestId = crypto.randomUUID();
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "VehicleRequest" ("id", "driverProfileId", "hubId", "status", "adminNotes", "createdAt", "updatedAt")
+       VALUES ($1, $2, $3, 'PENDING', $4, NOW(), NOW())`,
+      requestId,
+      driver.id,
+      driver.assignedHubId,
+      notes || null
+    );
+
+    return {
+      success: true,
+      pending: true,
+      message: 'Vehicle request submitted to Hub. Waiting for allocation.',
+      requestId,
+    };
+  }
+
+  async getVehicleRequests(status = 'PENDING') {
+    const requests = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT vr.*,
+              dp."id" as "driverId",
+              dp."personaType",
+              dp."rating",
+              dp."isOnline",
+              dp."approvalStatus",
+              u."name" as "driverName",
+              u."phone" as "driverPhone",
+              h."name" as "hubName",
+              v."vehicleNumber",
+              v."brand",
+              v."model"
+       FROM "VehicleRequest" vr
+       JOIN "DriverProfile" dp ON vr."driverProfileId" = dp."id"
+       JOIN "User" u ON dp."userId" = u."id"
+       LEFT JOIN "Hub" h ON vr."hubId" = h."id"
+       LEFT JOIN "Vehicle" v ON vr."assignedVehicleId" = v."id"
+       WHERE ($1 = 'ALL' OR vr."status" = $1)
+       ORDER BY vr."createdAt" DESC`,
+      status
+    ).catch((err) => {
+      console.error('Error fetching vehicle requests:', err);
+      return [];
+    });
+
+    return requests;
   }
 }
 

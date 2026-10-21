@@ -42,10 +42,10 @@ export async function notificationsRoutes(app: FastifyInstance) {
     notificationsController.deleteNotifications.bind(notificationsController)
   );
 
-  // Push notification trigger (Restricted to ADMIN role only)
+  // Push notification trigger (Restricted to ADMIN / SUPER_ADMIN / ZONE_ADMIN roles)
   app.post(
     '/test',
-    { preHandler: [requireRoles(['ADMIN'])] },
+    { preHandler: [requireRoles(['ADMIN', 'SUPER_ADMIN', 'ZONE_ADMIN'])] },
     notificationsController.sendTestNotification.bind(notificationsController)
   );
   app.post(

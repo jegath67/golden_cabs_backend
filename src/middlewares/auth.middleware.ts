@@ -1,9 +1,10 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
+import type { UserRole } from '../generated/prisma/enums';
 
 export interface JwtPayload {
   id: string;
   phone: string;
-  role: 'CUSTOMER' | 'DRIVER' | 'ADMIN' | 'DISPATCHER';
+  role: UserRole;
 }
 
 declare module '@fastify/jwt' {
@@ -24,7 +25,7 @@ export const authenticate = async (req: FastifyRequest, reply: FastifyReply) => 
   }
 };
 
-export const requireRoles = (roles: Array<'CUSTOMER' | 'DRIVER' | 'ADMIN' | 'DISPATCHER'>) => {
+export const requireRoles = (roles: Array<UserRole>) => {
   return async (req: FastifyRequest, reply: FastifyReply) => {
     try {
       await req.jwtVerify();

@@ -14,6 +14,7 @@ import { walletRoutes } from './modules/wallet/wallet.routes';
 import { couponsRoutes } from './modules/coupons/coupons.routes';
 import { refundsRoutes } from './modules/refunds/refunds.routes';
 import { reviewsRoutes } from './modules/reviews/reviews.routes';
+import { zonesRoutes } from './modules/zones/zones.routes';
 
 const app = Fastify({
   logger: true,
@@ -63,6 +64,7 @@ app.register(walletRoutes, { prefix: '/api/wallet' });
 app.register(couponsRoutes, { prefix: '/api/coupons' });
 app.register(refundsRoutes, { prefix: '/api/refunds' });
 app.register(reviewsRoutes, { prefix: '/api' });
+app.register(zonesRoutes, { prefix: '/api/zones' });
 
 const start = async () => {
   try {

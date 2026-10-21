@@ -15,6 +15,8 @@ enum UserRole {
   CUSTOMER
   DRIVER
   ADMIN
+  SUPER_ADMIN
+  ZONE_ADMIN
   DISPATCHER
 }
 
@@ -141,6 +143,10 @@ model User {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
+  // Zone Assignment for Sub-Admin / Zone-Admin
+  assignedZoneId    String?
+  assignedZone      Zone?           @relation("ZoneAdmins", fields: [assignedZoneId], references: [id])
+
   // Relationships
   customerProfile CustomerProfile?
   driverProfile   DriverProfile?
@@ -227,6 +233,41 @@ model Hub {
 
   assignedDrivers   DriverProfile[]
   stationedVehicles Vehicle[]
+
+  zoneId            String?
+  zone              Zone?           @relation(fields: [zoneId], references: [id])
+}
+
+// -------------------------------------------------------------
+// ZONES (GEOGRAPHICAL REGIONS & SURGE PRICING JURISDICTIONS)
+// -------------------------------------------------------------
+
+model Zone {
+  id              String   @id @default(uuid())
+  name            String   @unique
+  code            String?  // e.g. "C", "M", "P"
+  city            String   @default("Puducherry")
+  area            String?  // e.g. "Chennai Metropolitan Area"
+  status          String   @default("Active") // Active, Inactive, Suspended
+  coverage        String   @default("Full Coverage") // Full Coverage, Partial Coverage
+  serviceHours    String   @default("24/7")
+  managerName     String?
+  contactNumber   String?
+  description     String?
+  surgeMultiplier Float    @default(1.0)
+  baseFare        Float    @default(50.0)
+  population      Int?     @default(0)
+  centerLat       Float?
+  centerLng       Float?
+  radiusKm        Float?
+  coordinates     Json?    // Optional GeoJSON boundaries
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relationships
+  admins          User[]   @relation("ZoneAdmins")
+  hubs            Hub[]
 }
 
 // -------------------------------------------------------------

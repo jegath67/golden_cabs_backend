@@ -167,6 +167,26 @@ export class DriversController {
       return reply.status(400).send({ success: false, message: error.message || 'Failed to verify driver' });
     }
   }
+  async requestVehicle(req: FastifyRequest<any>, reply: FastifyReply) {
+    try {
+      const user = req.user as { id: string };
+      const body = (req.body as { notes?: string }) || {};
+      const result = await driversService.requestVehicle(user.id, body.notes);
+      return reply.send({ success: true, ...result });
+    } catch (error: any) {
+      return reply.status(400).send({ success: false, message: error.message || 'Failed to request vehicle' });
+    }
+  }
+
+  async getVehicleRequests(req: FastifyRequest<any>, reply: FastifyReply) {
+    try {
+      const { status } = (req.query as { status?: string }) || {};
+      const requests = await driversService.getVehicleRequests(status || 'PENDING');
+      return reply.send({ success: true, data: requests });
+    } catch (error: any) {
+      return reply.status(500).send({ success: false, message: 'Failed to fetch vehicle requests', error: String(error) });
+    }
+  }
 }
 
 export const driversController = new DriversController();

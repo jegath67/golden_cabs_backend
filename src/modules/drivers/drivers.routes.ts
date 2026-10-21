@@ -34,11 +34,23 @@ export async function driversRoutes(app: FastifyInstance) {
     driversController.selectHub.bind(driversController)
   );
 
+  app.post(
+    '/request-vehicle',
+    { preHandler: [requireRoles(['DRIVER'])] },
+    driversController.requestVehicle.bind(driversController)
+  );
+
   // Admin routes
   app.get(
     '/',
     { preHandler: [requireRoles(['ADMIN', 'DISPATCHER'])] },
     driversController.getAllDrivers.bind(driversController)
+  );
+
+  app.get(
+    '/vehicle-requests',
+    { preHandler: [requireRoles(['ADMIN', 'DISPATCHER'])] },
+    driversController.getVehicleRequests.bind(driversController)
   );
 
   app.patch(

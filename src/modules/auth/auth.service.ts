@@ -566,7 +566,10 @@ export class AuthService {
           { phone: cleanId },
           ...(normalizedPhone ? [{ phone: normalizedPhone }] : []),
         ],
-        role: { in: ['ADMIN', 'DISPATCHER'] },
+        role: { in: ['SUPER_ADMIN', 'ADMIN', 'ZONE_ADMIN', 'DISPATCHER'] },
+      },
+      include: {
+        assignedZone: true,
       },
     });
 

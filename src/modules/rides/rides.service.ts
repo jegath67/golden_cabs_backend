@@ -263,7 +263,11 @@ export class RidesService {
     actorRole: 'CUSTOMER' | 'DRIVER' | 'ADMIN',
     cancelReason?: string
   ) {
-    const ride = await prisma.ride.findUnique({ where: { id: rideId } });
+    const ride = await prisma.ride.findFirst({
+      where: {
+        OR: [{ id: rideId }, { bookingCode: rideId }],
+      },
+    });
     if (!ride) throw new Error('Ride not found');
 
     // Idempotency: If ride is already cancelled, return cleanly without duplicate operations
@@ -290,7 +294,7 @@ export class RidesService {
         }
 
         return tx.ride.update({
-          where: { id: rideId },
+          where: { id: ride.id },
           data: {
             status: 'CANCELLED',
             cancelReason,
@@ -305,7 +309,7 @@ export class RidesService {
       });
     } else {
       updated = await prisma.ride.update({
-        where: { id: rideId },
+        where: { id: ride.id },
         data: { status },
         include: {
           customer: true,
