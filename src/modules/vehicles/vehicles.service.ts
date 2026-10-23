@@ -7,6 +7,7 @@ export class VehiclesService {
     type?: 'SEDAN' | 'SUV' | 'HATCHBACK' | 'LUXURY' | 'AUTO';
     status?: 'PENDING' | 'VERIFIED' | 'REJECTED' | 'MAINTENANCE';
     hubId?: string;
+    unassignedOnly?: boolean;
   }) {
     return prisma.vehicle.findMany({
       where: {
@@ -14,6 +15,7 @@ export class VehiclesService {
         ...(filters?.type ? { vehicleType: filters.type } : {}),
         ...(filters?.status ? { status: filters.status } : {}),
         ...(filters?.hubId ? { assignedHubId: filters.hubId } : {}),
+        ...(filters?.unassignedOnly ? { assignedDriver: null } : {}),
       },
       include: {
         assignedHub: true,
@@ -160,6 +162,12 @@ export class VehiclesService {
         },
       });
     }
+
+    // 2b. If this vehicle was previously assigned to another driver, unassign that driver first
+    await prisma.driverProfile.updateMany({
+      where: { assignedVehicleId: vehicleId, id: { not: driverProfileId } },
+      data: { assignedVehicleId: null },
+    });
 
     // 3. Connect this vehicle to the driver
     const updated = await prisma.vehicle.update({

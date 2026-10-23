@@ -9,8 +9,13 @@ export class VehiclesController {
         type?: 'SEDAN' | 'SUV' | 'HATCHBACK' | 'LUXURY' | 'AUTO';
         status?: 'PENDING' | 'VERIFIED' | 'REJECTED' | 'MAINTENANCE';
         hubId?: string;
+        unassignedOnly?: string | boolean;
       };
-      const vehicles = await vehiclesService.getAllVehicles(filters);
+      const unassignedOnly = filters.unassignedOnly === true || filters.unassignedOnly === 'true';
+      const vehicles = await vehiclesService.getAllVehicles({
+        ...filters,
+        unassignedOnly,
+      });
       return reply.send({ success: true, data: vehicles });
     } catch (error) {
       return reply.status(500).send({ success: false, message: 'Failed to fetch vehicles', error: String(error) });
