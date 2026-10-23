@@ -538,4 +538,79 @@ model Review {
   updatedAt   DateTime      @updatedAt
 }
 
+// -------------------------------------------------------------
+// DYNAMIC APP CONTENT (EXPLORE, ELITE CARS, BANNERS)
+// -------------------------------------------------------------
+
+model ExplorePlace {
+  id           String   @id @default(uuid())
+  name         String
+  category     String   // 'Restaurants', 'Cafes', 'Textiles', 'Pubs & Bars'
+  subCategory  String?
+  location     String
+  address      String?
+  phone        String?
+  imageUrl     String?
+  image        String?  // emoji or icon
+  offers       String?
+  offerExpiry  String?
+  rating       Float    @default(4.5)
+  reviewsCount Int      @default(120)
+  openTime     String   @default("07:00 AM")
+  closeTime    String   @default("11:00 PM")
+  distance     String?
+  avgCost      String?
+  status       String   @default("Active") // 'Active', 'Inactive', 'Suspended'
+  gallery      String[] @default([])
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model EliteCar {
+  id           String   @id @default(uuid())
+  brand        String
+  model        String
+  category     String   @default("Luxury")
+  rating       Float    @default(4.9)
+  status       String   @default("AVAILABLE") // 'AVAILABLE', 'BOOKED', 'MAINTENANCE'
+  image        String
+  gallery      String[] @default([])
+  speed        String?
+  seats        String?
+  features     String?
+  price        String?
+  pricePerKm   Float    @default(25.0)
+  fuelType     String?  @default("Petrol")
+  transmission String?  @default("Automatic")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model PromoBanner {
+  id           String   @id @default(uuid())
+  title        String
+  description  String?
+  imageUrl     String
+  target       String   @default("User App") // 'User App', 'Driver App', 'All'
+  status       String   @default("Active")   // 'Active', 'Inactive'
+  startDate    String?
+  endDate      String?
+  priority     String   @default("High")
+  campaignType String?  @default("Promotional Offer")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model VehicleRequest {
+  id                String   @id @default(uuid())
+  driverProfileId   String
+  hubId             String?
+  assignedVehicleId String?
+  status            String   @default("PENDING")
+  adminNotes        String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+
 

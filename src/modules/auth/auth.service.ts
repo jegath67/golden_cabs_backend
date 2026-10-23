@@ -272,7 +272,7 @@ export class AuthService {
       user = await prisma.user.create({
         data: {
           phone: cleanPhone,
-          name: name || (role === 'DRIVER' ? 'New Driver' : 'New Customer'),
+          name: name && name.trim().length > 0 ? name.trim() : (role === 'DRIVER' ? 'New Driver' : 'New Customer'),
           role,
           customerProfile:
             role === 'CUSTOMER'
@@ -300,6 +300,13 @@ export class AuthService {
         },
       });
     } else {
+      if (name && name.trim().length > 0 && (user.name === 'New Driver' || user.name === 'New Customer')) {
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { name: name.trim() },
+        });
+      }
+
       // If user exists but role profile is missing, create it
       if (role === 'CUSTOMER' && !user.customerProfile) {
         await prisma.customerProfile.create({

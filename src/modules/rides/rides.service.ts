@@ -572,9 +572,13 @@ export class RidesService {
       orConditions.push({ status: TripStatus.ACCEPTED });
     }
 
+    // Only return live requests created within the last 15 minutes
+    const freshnessCutoff = new Date(Date.now() - 15 * 60 * 1000);
+
     const rides = await prisma.ride.findMany({
       where: {
         OR: orConditions,
+        createdAt: { gte: freshnessCutoff },
       },
       orderBy: { createdAt: 'desc' },
       take: limit,

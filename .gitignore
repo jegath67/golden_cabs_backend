@@ -31,3 +31,6 @@ prisma7.config.js.map
 
 # Scratch / local debug
 scratch/
+
+# Uploads
+uploads/

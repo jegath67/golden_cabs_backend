@@ -43,6 +43,8 @@ export class DriversService {
   async updateKycDocuments(
     userId: string,
     data: {
+      name?: string;
+      email?: string;
       personaType?: 'DRIVE_ONLY' | 'OWN_VEHICLE' | 'RENTAL';
       licenseNumber?: string;
       licenseExpiry?: string;
@@ -55,8 +57,104 @@ export class DriversService {
       panImage?: string;
       selfieImage?: string;
       assignedHubId?: string;
+      vehicle?: {
+        brand?: string;
+        model?: string;
+        year?: number;
+        regNumber?: string;
+        rcNumber?: string;
+        rcExpiry?: string;
+        rcFront?: string;
+        rcBack?: string;
+        insuranceNumber?: string;
+        insuranceExpiry?: string;
+        insuranceDoc?: string;
+        seaterType?: string;
+        fuelType?: string;
+        gearType?: string;
+        vehiclePhoto?: string;
+      };
     }
   ) {
+    if (data.name && data.name.trim().length > 0) {
+      await prisma.user.update({
+        where: { id: userId },
+        data: {
+          name: data.name.trim(),
+          ...(data.email && data.email.trim().length > 0 ? { email: data.email.trim() } : {}),
+        },
+      });
+    }
+
+    const driver = await prisma.driverProfile.findUnique({
+      where: { userId },
+    });
+    if (!driver) {
+      throw new Error('Driver profile not found');
+    }
+
+    let assignedVehicleId: string | undefined = undefined;
+
+    if (data.vehicle && data.vehicle.regNumber && data.vehicle.regNumber.trim().length > 0) {
+      const cleanReg = data.vehicle.regNumber.trim().toUpperCase();
+      const fuel = (data.vehicle.fuelType?.toUpperCase() === 'DIESEL'
+        ? 'DIESEL'
+        : data.vehicle.fuelType?.toUpperCase() === 'CNG'
+        ? 'CNG'
+        : data.vehicle.fuelType?.toUpperCase() === 'ELECTRIC'
+        ? 'ELECTRIC'
+        : 'PETROL') as any;
+      const gear = (data.vehicle.gearType?.toUpperCase() === 'AUTOMATIC' ? 'AUTOMATIC' : 'MANUAL') as any;
+
+      const existingVehicle = await prisma.vehicle.findUnique({
+        where: { vehicleNumber: cleanReg },
+      });
+
+      if (existingVehicle) {
+        const updated = await prisma.vehicle.update({
+          where: { id: existingVehicle.id },
+          data: {
+            brand: data.vehicle.brand || existingVehicle.brand,
+            model: data.vehicle.model || existingVehicle.model,
+            year: Number(data.vehicle.year) || existingVehicle.year,
+            fuelType: fuel,
+            gearType: gear,
+            rcNumber: data.vehicle.rcNumber || cleanReg,
+            rcExpiry: data.vehicle.rcExpiry || existingVehicle.rcExpiry,
+            rcFront: data.vehicle.rcFront || existingVehicle.rcFront,
+            rcBack: data.vehicle.rcBack || existingVehicle.rcBack,
+            insuranceNumber: data.vehicle.insuranceNumber || existingVehicle.insuranceNumber,
+            insuranceExpiry: data.vehicle.insuranceExpiry || existingVehicle.insuranceExpiry,
+            insuranceDoc: data.vehicle.insuranceDoc || existingVehicle.insuranceDoc,
+            ownerId: driver.id,
+            status: 'PENDING',
+          },
+        });
+        assignedVehicleId = updated.id;
+      } else {
+        const created = await prisma.vehicle.create({
+          data: {
+            vehicleNumber: cleanReg,
+            brand: data.vehicle.brand || 'Vehicle',
+            model: data.vehicle.model || 'Model',
+            year: Number(data.vehicle.year) || 2022,
+            fuelType: fuel,
+            gearType: gear,
+            rcNumber: data.vehicle.rcNumber || cleanReg,
+            rcExpiry: data.vehicle.rcExpiry,
+            rcFront: data.vehicle.rcFront,
+            rcBack: data.vehicle.rcBack,
+            insuranceNumber: data.vehicle.insuranceNumber,
+            insuranceExpiry: data.vehicle.insuranceExpiry,
+            insuranceDoc: data.vehicle.insuranceDoc,
+            ownerId: driver.id,
+            status: 'PENDING',
+          },
+        });
+        assignedVehicleId = created.id;
+      }
+    }
+
     return prisma.driverProfile.update({
       where: { userId },
       data: {
@@ -72,10 +170,14 @@ export class DriversService {
         ...(data.panImage ? { panImage: data.panImage } : {}),
         ...(data.selfieImage ? { selfieImage: data.selfieImage } : {}),
         ...(data.assignedHubId ? { assignedHubId: data.assignedHubId } : {}),
+        ...(assignedVehicleId ? { assignedVehicleId } : {}),
         approvalStatus: 'PENDING', // Re-triggers pending review upon doc submission
       },
       include: {
+        user: true,
         assignedHub: true,
+        assignedVehicle: true,
+        ownedVehicles: true,
       },
     });
   }
@@ -182,6 +284,7 @@ export class DriversService {
         user: { select: { id: true, name: true, phone: true, email: true } },
         assignedHub: true,
         assignedVehicle: true,
+        ownedVehicles: true,
         wallet: true,
       },
       orderBy: { createdAt: 'desc' },
