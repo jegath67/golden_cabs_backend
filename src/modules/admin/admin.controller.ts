@@ -1,6 +1,94 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { prisma } from '../../config/prisma';
 
+function formatDriverCode(driverId?: string | null): string | null {
+  if (!driverId) return null;
+  const clean = driverId.replace(/^DRV-/i, '').replace(/-/g, '').toUpperCase();
+  const suffix = clean.length >= 5 ? clean.substring(0, 5) : clean.padStart(4, '0');
+  return `DRV-${suffix}`;
+}
+
+function formatRideResponse(r: any) {
+  const meta = (r.stops as any) || {};
+  const isScheduled = !!meta.isScheduled && !!meta.scheduledAt;
+
+  let displayStatus = 'New Request';
+  if (isScheduled && !r.driverId && r.status === 'SEARCHING') {
+    displayStatus = 'Scheduled';
+  } else if (r.status === 'SEARCHING') {
+    displayStatus = r.driverId ? 'Assigned' : 'New Request';
+  } else if (r.status === 'ACCEPTED') {
+    displayStatus = 'Assigned';
+  } else if (['EN_ROUTE', 'ARRIVED', 'ONGOING'].includes(r.status)) {
+    displayStatus = 'Ongoing';
+  } else if (r.status === 'COMPLETED') {
+    displayStatus = 'Completed';
+  } else if (r.status === 'CANCELLED') {
+    displayStatus = 'Cancelled';
+  }
+
+  let tripType = 'Local Ride';
+  if (r.tripType === 'ROUND_TRIP') tripType = 'Round Trip';
+  else if (r.tripType === 'OUTSTATION') tripType = 'Outstation Oneway';
+  else if (r.tripType === 'RENTAL') tripType = 'Rental Package';
+
+  const fareNum = r.fareBreakdown?.totalFare ?? r.estimatedFare ?? 0;
+  const distNum = r.distanceKm ?? 0;
+
+  const scheduledDateStr = meta.scheduledAt ? String(meta.scheduledAt) : '';
+  const createdDateStr = r.createdAt ? r.createdAt.toISOString().replace('T', ' ').substring(0, 16) : '';
+  const finalDatetime = scheduledDateStr || createdDateStr;
+
+  const seatCap = meta.seatCapacity ? String(meta.seatCapacity) : (meta.requestedVehicle?.includes('6') ? '6' : '4');
+  const reqVehicle = meta.requestedVehicle || (seatCap === '6' ? '6 Seater Cab' : '4 Seater Cab');
+
+  const rawDriverId = r.driver?.id || r.driverId || null;
+  const driverCode = formatDriverCode(rawDriverId);
+
+  return {
+    id: r.id,
+    bookingId: r.bookingCode || r.id,
+    type: tripType,
+    datetime: finalDatetime,
+    status: displayStatus,
+    dbStatus: r.status,
+    customerId: r.customer?.id || r.customerId,
+    customerName: r.customer?.name || 'Customer',
+    customerPhone: r.customer?.phone || '',
+    requestedVehicleId: reqVehicle,
+    requestedSeatCount: seatCap,
+    assignedDriverId: rawDriverId,
+    assignedDriverCode: driverCode,
+    assignedDriverName: r.driver?.user?.name || null,
+    assignedDriverPhone: r.driver?.user?.phone || null,
+    assignedVehicleId: r.vehicleId || null,
+    pickup: r.pickupAddress || r.pickupLocation,
+    drop: r.dropAddress || r.dropLocation,
+    fare: `₹ ${Math.round(fareNum)}`,
+    fareAmount: fareNum,
+    distance: `${distNum} km`,
+    distanceKm: distNum,
+    pickupLat: r.pickupLat,
+    pickupLng: r.pickupLng,
+    dropLat: r.dropLat,
+    dropLng: r.dropLng,
+    driverLat: r.driver?.currentLatitude ?? null,
+    driverLng: r.driver?.currentLongitude ?? null,
+    driverLocationUpdatedAt: r.driver?.updatedAt ? r.driver.updatedAt.toISOString() : null,
+    startOtp: r.startOtp,
+    isLive: ['SEARCHING', 'ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'].includes(r.status),
+    assignmentMode: 'Manual',
+    matchScore: 90,
+    stops: [],
+    dispatchTimeline: [
+      {
+        time: r.createdAt ? r.createdAt.toTimeString().substring(0, 5) : '',
+        event: 'Ride Created',
+      },
+    ],
+  };
+}
+
 export class AdminController {
   /**
    * List all registered customers with profile and ride counts
@@ -246,82 +334,7 @@ export class AdminController {
         },
       });
 
-      const formatted = rides.map((r) => {
-        const meta = (r.stops as any) || {};
-        const isScheduled = !!meta.isScheduled && !!meta.scheduledAt;
-
-        let displayStatus = 'New Request';
-        if (isScheduled && !r.driverId && r.status === 'SEARCHING') {
-          displayStatus = 'Scheduled';
-        } else if (r.status === 'SEARCHING') {
-          displayStatus = r.driverId ? 'Assigned' : 'New Request';
-        } else if (r.status === 'ACCEPTED') {
-          displayStatus = 'Assigned';
-        } else if (['EN_ROUTE', 'ARRIVED', 'ONGOING'].includes(r.status)) {
-          displayStatus = 'Ongoing';
-        } else if (r.status === 'COMPLETED') {
-          displayStatus = 'Completed';
-        } else if (r.status === 'CANCELLED') {
-          displayStatus = 'Cancelled';
-        }
-
-        let tripType = 'Local Ride';
-        if (r.tripType === 'ROUND_TRIP') tripType = 'Round Trip';
-        else if (r.tripType === 'OUTSTATION') tripType = 'Outstation Oneway';
-        else if (r.tripType === 'RENTAL') tripType = 'Rental Package';
-
-        const fareNum = r.fareBreakdown?.totalFare ?? r.estimatedFare ?? 0;
-        const distNum = r.distanceKm ?? 0;
-
-        const scheduledDateStr = meta.scheduledAt ? String(meta.scheduledAt) : '';
-        const createdDateStr = r.createdAt ? r.createdAt.toISOString().replace('T', ' ').substring(0, 16) : '';
-        const finalDatetime = scheduledDateStr || createdDateStr;
-
-        const seatCap = meta.seatCapacity ? String(meta.seatCapacity) : (meta.requestedVehicle?.includes('6') ? '6' : '4');
-        const reqVehicle = meta.requestedVehicle || (seatCap === '6' ? '6 Seater Cab' : '4 Seater Cab');
-
-        return {
-          id: r.id,
-          bookingId: r.bookingCode || r.id,
-          type: tripType,
-          datetime: finalDatetime,
-          status: displayStatus,
-          dbStatus: r.status,
-          customerId: r.customer?.id || r.customerId,
-          customerName: r.customer?.name || 'Customer',
-          customerPhone: r.customer?.phone || '',
-          requestedVehicleId: reqVehicle,
-          requestedSeatCount: seatCap,
-          assignedDriverId: r.driver?.id || null,
-          assignedDriverName: r.driver?.user?.name || null,
-          assignedDriverPhone: r.driver?.user?.phone || null,
-          assignedVehicleId: r.vehicleId || null,
-          pickup: r.pickupAddress || r.pickupLocation,
-          drop: r.dropAddress || r.dropLocation,
-          fare: `₹ ${Math.round(fareNum)}`,
-          fareAmount: fareNum,
-          distance: `${distNum} km`,
-          distanceKm: distNum,
-          pickupLat: r.pickupLat,
-          pickupLng: r.pickupLng,
-          dropLat: r.dropLat,
-          dropLng: r.dropLng,
-          driverLat: r.driver?.currentLatitude ?? null,
-          driverLng: r.driver?.currentLongitude ?? null,
-          driverLocationUpdatedAt: r.driver?.updatedAt ? r.driver.updatedAt.toISOString() : null,
-          startOtp: r.startOtp,
-          isLive: ['SEARCHING', 'ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'].includes(r.status),
-          assignmentMode: 'Manual',
-          matchScore: 90,
-          stops: [],
-          dispatchTimeline: [
-            {
-              time: r.createdAt ? r.createdAt.toTimeString().substring(0, 5) : '',
-              event: 'Ride Created',
-            },
-          ],
-        };
-      });
+      const formatted = rides.map((r) => formatRideResponse(r));
 
       return reply.send({
         success: true,
@@ -365,7 +378,7 @@ export class AdminController {
         return reply.status(404).send({ success: false, message: 'Ride not found' });
       }
 
-      return reply.send({ success: true, data: ride });
+      return reply.send({ success: true, data: formatRideResponse(ride) });
     } catch (error) {
       req.log.error(error);
       return reply.status(500).send({
@@ -400,24 +413,24 @@ export class AdminController {
       let finalVehicleId: string | null = null;
 
       if (driverId) {
-        const driverProfile = await prisma.driverProfile.findFirst({
-          where: {
-            OR: [
-              { id: driverId },
-              { user: { id: driverId } },
-              { user: { phone: driverId } },
-            ],
-          },
-          include: { assignedVehicle: true },
+        const cleanDriverId = String(driverId).replace(/^DRV-/i, '').replace(/-/g, '').toLowerCase();
+        const allDrivers = await prisma.driverProfile.findMany({
+          include: { assignedVehicle: true, user: true },
         });
 
-        if (driverProfile) {
-          finalDriverId = driverProfile.id;
-          finalVehicleId = vehicleId || driverProfile.assignedVehicleId || driverProfile.assignedVehicle?.id || null;
+        const matched = allDrivers.find(
+          (d) =>
+            d.id === driverId ||
+            d.user?.id === driverId ||
+            d.user?.phone === driverId ||
+            d.id.replace(/-/g, '').toLowerCase().startsWith(cleanDriverId)
+        );
+
+        if (matched) {
+          finalDriverId = matched.id;
+          finalVehicleId = vehicleId || matched.assignedVehicleId || matched.assignedVehicle?.id || null;
         } else {
-          const firstDriver = await prisma.driverProfile.findFirst({
-            include: { assignedVehicle: true },
-          });
+          const firstDriver = allDrivers[0];
           if (firstDriver) {
             finalDriverId = firstDriver.id;
             finalVehicleId = vehicleId || firstDriver.assignedVehicleId || null;
@@ -484,7 +497,7 @@ export class AdminController {
       return reply.send({
         success: true,
         message: 'Driver assigned successfully',
-        data: updated,
+        data: formatRideResponse(updated),
       });
     } catch (error) {
       req.log.error(error);

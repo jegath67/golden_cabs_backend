@@ -274,7 +274,7 @@ export class DriversService {
     shiftStatus?: 'ON_SHIFT' | 'OFF_SHIFT';
     personaType?: 'DRIVE_ONLY' | 'OWN_VEHICLE' | 'RENTAL';
   }) {
-    return prisma.driverProfile.findMany({
+    const list = await prisma.driverProfile.findMany({
       where: {
         ...(filters?.approvalStatus ? { approvalStatus: filters.approvalStatus } : {}),
         ...(filters?.shiftStatus ? { shiftStatus: filters.shiftStatus } : {}),
@@ -288,6 +288,15 @@ export class DriversService {
         wallet: true,
       },
       orderBy: { createdAt: 'desc' },
+    });
+
+    return list.map((d) => {
+      const clean = d.id.replace(/-/g, '').toUpperCase();
+      const suffix = clean.length >= 5 ? clean.substring(0, 5) : clean.padStart(4, '0');
+      return {
+        ...d,
+        driverCode: `DRV-${suffix}`,
+      };
     });
   }
 
