@@ -600,6 +600,7 @@ export class AuthService {
       where: { id: userId },
       include: {
         customerProfile: true,
+        assignedZone: true,
         driverProfile: {
           include: {
             wallet: true,
@@ -618,6 +619,7 @@ export class AuthService {
   async updateProfile(userId: string, data: {
     name?: string;
     email?: string;
+    phone?: string;
     gender?: string;
     dob?: string;
     address?: string;
@@ -640,6 +642,22 @@ export class AuthService {
       const trimmed = data.name.trim();
       if (!trimmed) throw new Error('Name cannot be empty');
       userUpdates.name = trimmed;
+    }
+
+    if (data.phone !== undefined) {
+      const cleanPhone = data.phone.replace(/[^0-9]/g, '');
+      if (cleanPhone.length >= 10) {
+        const last10 = cleanPhone.slice(-10);
+        if (last10 !== user.phone) {
+          const existingPhone = await prisma.user.findUnique({ where: { phone: last10 } });
+          if (existingPhone && existingPhone.id !== userId) {
+            const err: any = new Error('Phone number is already registered with another account');
+            err.statusCode = 409;
+            throw err;
+          }
+          userUpdates.phone = last10;
+        }
+      }
     }
 
     if (data.email !== undefined) {

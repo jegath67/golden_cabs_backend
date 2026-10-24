@@ -1,5 +1,6 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { prisma } from '../../config/prisma';
+import { standardizeTripType } from '../../utils/trip-type.helper';
 
 function formatDriverCode(driverId?: string | null): string | null {
   if (!driverId) return null;
@@ -27,10 +28,17 @@ function formatRideResponse(r: any) {
     displayStatus = 'Cancelled';
   }
 
-  let tripType = 'Local Ride';
-  if (r.tripType === 'ROUND_TRIP') tripType = 'Round Trip';
-  else if (r.tripType === 'OUTSTATION') tripType = 'Outstation Oneway';
-  else if (r.tripType === 'RENTAL') tripType = 'Rental Package';
+  const tripType = standardizeTripType({
+    customTripType: meta.customTripType,
+    tripType: r.tripType,
+    distanceKm: r.distanceKm,
+  });
+  const isElite = !!(
+    meta.isElite ||
+    meta.category === 'ELITE' ||
+    meta.requestedVehicle?.toLowerCase().includes('elite') ||
+    r.tripType?.toLowerCase().includes('elite')
+  );
 
   const fareNum = r.fareBreakdown?.totalFare ?? r.estimatedFare ?? 0;
   const distNum = r.distanceKm ?? 0;
@@ -49,6 +57,8 @@ function formatRideResponse(r: any) {
     id: r.id,
     bookingId: r.bookingCode || r.id,
     type: tripType,
+    isElite,
+    category: isElite ? 'ELITE' : (meta.category || 'REGULAR'),
     datetime: finalDatetime,
     status: displayStatus,
     dbStatus: r.status,
@@ -398,9 +408,16 @@ export class AdminController {
       const { driverId, vehicleId } = (req.body as any) || {};
 
       // 1. Locate ride by id or bookingCode
+      const rawId = String(id).trim();
+      const cleanId = rawId.replace(/^#/, '').trim();
       const ride = await prisma.ride.findFirst({
         where: {
-          OR: [{ id }, { bookingCode: id }],
+          OR: [
+            { id: rawId },
+            { bookingCode: rawId },
+            { id: cleanId },
+            { bookingCode: cleanId },
+          ],
         },
       });
 
@@ -413,18 +430,32 @@ export class AdminController {
       let finalVehicleId: string | null = null;
 
       if (driverId) {
-        const cleanDriverId = String(driverId).replace(/^DRV-/i, '').replace(/-/g, '').toLowerCase();
+        const rawStr = String(driverId).trim();
+        const cleanDriverId = rawStr
+          .replace(/^GC-/i, '')
+          .replace(/^DRV-/i, '')
+          .replace(/-/g, '')
+          .toLowerCase();
+
         const allDrivers = await prisma.driverProfile.findMany({
           include: { assignedVehicle: true, user: true },
         });
 
-        const matched = allDrivers.find(
-          (d) =>
+        const matched = allDrivers.find((d) => {
+          const dCleanId = d.id.replace(/-/g, '').toLowerCase();
+          const dCleanUserId = d.userId ? d.userId.replace(/-/g, '').toLowerCase() : '';
+          return (
+            d.id === rawStr ||
             d.id === driverId ||
-            d.user?.id === driverId ||
-            d.user?.phone === driverId ||
-            d.id.replace(/-/g, '').toLowerCase().startsWith(cleanDriverId)
-        );
+            d.userId === rawStr ||
+            d.user?.id === rawStr ||
+            d.user?.phone === rawStr ||
+            dCleanId === cleanDriverId ||
+            dCleanId.startsWith(cleanDriverId) ||
+            cleanDriverId.startsWith(dCleanId.substring(0, 5)) ||
+            (dCleanUserId && dCleanUserId.startsWith(cleanDriverId))
+          );
+        });
 
         if (matched) {
           finalDriverId = matched.id;
@@ -469,23 +500,40 @@ export class AdminController {
             select: { userId: true },
           });
           if (dp?.userId) {
+            const smartCode = updated.bookingCode || `GC-${updated.id.replace(/-/g, '').substring(0, 6).toUpperCase()}`;
             await notificationsService.sendToUser({
               userId: dp.userId,
               title: '🚖 New Trip Assigned!',
-              message: `You have been assigned ride ${updated.bookingCode}. Open app to accept.`,
+              message: `You have been assigned ride ${smartCode}. Open app to accept.`,
               type: 'ride_assigned',
               data: {
                 rideId: updated.id,
-                bookingCode: updated.bookingCode,
+                bookingCode: smartCode,
                 pickupLocation: updated.pickupLocation,
+                pickupAddress: updated.pickupAddress || updated.pickupLocation,
                 dropLocation: updated.dropLocation,
+                dropAddress: updated.dropAddress || updated.dropLocation,
                 distance: `${updated.distanceKm} km`,
-                estimatedFare: `₹${updated.estimatedFare}`,
-                tripType: updated.tripType,
+                estimatedFare: `₹${Math.round(updated.fareBreakdown?.totalFare ?? updated.estimatedFare ?? 0)}`,
+                tripType: standardizeTripType({
+                  customTripType: (updated.stops as any)?.customTripType,
+                  tripType: updated.tripType,
+                  distanceKm: updated.distanceKm,
+                }),
+                isElite: String(!!(
+                  (updated.stops as any)?.isElite ||
+                  (updated.stops as any)?.category === 'ELITE' ||
+                  (updated.stops as any)?.requestedVehicle?.toLowerCase().includes('elite') ||
+                  updated.tripType?.toLowerCase().includes('elite')
+                )),
                 paymentMethod: updated.paymentMethod,
                 customerName: updated.customer?.name || 'Customer',
                 customerPhone: updated.customer?.phone || '',
                 startOtp: updated.startOtp || '',
+                pickupLat: String(updated.pickupLat ?? 11.9360),
+                pickupLng: String(updated.pickupLng ?? 79.8174),
+                dropLat: String(updated.dropLat ?? 11.9680),
+                dropLng: String(updated.dropLng ?? 79.8105),
               },
             });
           }
@@ -613,6 +661,19 @@ export class AdminController {
       return reply.send({ success: true, message: 'Admin account updated successfully', data: updated });
     } catch (error: any) {
       return reply.status(400).send({ success: false, message: error.message || 'Failed to update sub-admin' });
+    }
+  }
+
+  async deleteSubAdmin(req: FastifyRequest, reply: FastifyReply) {
+    try {
+      const { id } = req.params as { id: string };
+      await prisma.user.update({
+        where: { id },
+        data: { isActive: false },
+      });
+      return reply.send({ success: true, message: 'Admin account deactivated successfully' });
+    } catch (error: any) {
+      return reply.status(400).send({ success: false, message: error.message || 'Failed to delete sub-admin' });
     }
   }
 }

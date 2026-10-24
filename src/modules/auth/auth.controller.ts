@@ -208,7 +208,7 @@ export class AuthController {
 
     // Security Guard: Prevent privilege escalation and tampering with system keys
     const sanitizedData = { ...body };
-    const forbiddenKeys = ['role', 'isActive', 'rating', 'totalRides', 'phone', 'id', 'passwordHash', 'createdAt', 'updatedAt'];
+    const forbiddenKeys = ['role', 'isActive', 'rating', 'totalRides', 'id', 'passwordHash', 'createdAt', 'updatedAt'];
     for (const key of forbiddenKeys) {
       delete sanitizedData[key];
     }

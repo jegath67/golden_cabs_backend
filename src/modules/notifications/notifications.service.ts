@@ -123,8 +123,12 @@ export class NotificationsService {
         android: {
           priority: 'high',
           notification: {
-            sound: 'default',
-            channelId: 'golden_cabs_channel',
+            sound: (type === 'vehicle_assignment' || type === 'ride_assigned' || type === 'ride_request')
+              ? 'vehicle_assigned'
+              : 'default',
+            channelId: (type === 'vehicle_assignment' || type === 'ride_assigned' || type === 'ride_request')
+              ? 'golden_cabs_vehicle_channel'
+              : 'golden_cabs_channel',
           },
         },
       });
