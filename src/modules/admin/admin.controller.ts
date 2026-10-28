@@ -10,6 +10,13 @@ function formatDriverCode(driverId?: string | null): string | null {
   return `DRV-${suffix}`;
 }
 
+function formatCustomerCode(userId?: string | null): string {
+  if (!userId) return 'CUST-00000';
+  const clean = String(userId).replace(/^CUST-/i, '').replace(/-/g, '').toUpperCase();
+  const suffix = clean.length >= 5 ? clean.slice(-5) : clean.padStart(5, '0');
+  return `CUST-${suffix}`;
+}
+
 function formatRideResponse(r: any) {
   const meta = (r.stops as any) || {};
   const isScheduled = !!meta.isScheduled && !!meta.scheduledAt;
@@ -20,7 +27,7 @@ function formatRideResponse(r: any) {
   } else if (r.status === 'SEARCHING') {
     displayStatus = r.driverId ? 'Assigned' : 'New Request';
   } else if (r.status === 'ACCEPTED') {
-    displayStatus = 'Assigned';
+    displayStatus = 'Accepted';
   } else if (['EN_ROUTE', 'ARRIVED', 'ONGOING'].includes(r.status)) {
     displayStatus = 'Ongoing';
   } else if (r.status === 'COMPLETED') {
@@ -81,6 +88,7 @@ function formatRideResponse(r: any) {
     datetime: finalDatetime,
     status: displayStatus,
     dbStatus: r.status,
+    isDriverAccepted: r.status === 'ACCEPTED' || ['EN_ROUTE', 'ARRIVED', 'ONGOING', 'COMPLETED'].includes(r.status),
     customerId: r.customer?.id || r.customerId,
     customerName: r.customer?.name || 'Customer',
     customerPhone: r.customer?.phone || '',
@@ -107,6 +115,9 @@ function formatRideResponse(r: any) {
     startOtp: r.startOtp,
     isLive: ['SEARCHING', 'ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'].includes(r.status),
     assignmentMode: 'Manual',
+    cancelReason: r.cancelReason || null,
+    cancelledBy: r.cancelledBy || null,
+    cancelledAt: r.status === 'CANCELLED' ? (r.updatedAt ? r.updatedAt.toISOString() : null) : null,
     stops: Array.isArray(meta.additionalStops)
       ? meta.additionalStops
       : (Array.isArray(meta.stops) ? meta.stops : []),
@@ -142,6 +153,7 @@ export class AdminController {
 
         return {
           id: u.id,
+          customerCode: formatCustomerCode(u.id),
           name: u.name || 'Customer',
           phone: u.phone,
           email: u.email || '',
@@ -182,8 +194,17 @@ export class AdminController {
     const { id } = req.params as { id: string };
 
     try {
+      const cleanId = String(id).trim();
+      const isCustCode = cleanId.toUpperCase().startsWith('CUST-');
+      const suffix = isCustCode ? cleanId.substring(5).replace(/-/g, '').toLowerCase() : null;
+
       const customer = await prisma.user.findFirst({
-        where: { id, role: 'CUSTOMER' },
+        where: {
+          role: 'CUSTOMER',
+          ...(isCustCode
+            ? { id: { endsWith: suffix! } }
+            : { id: cleanId }),
+        },
         include: {
           customerProfile: true,
           _count: {
@@ -206,6 +227,7 @@ export class AdminController {
         success: true,
         data: {
           id: customer.id,
+          customerCode: formatCustomerCode(customer.id),
           name: customer.name || 'Customer',
           phone: customer.phone,
           email: customer.email || '',
@@ -324,7 +346,10 @@ export class AdminController {
       return reply.status(201).send({
         success: true,
         message: 'Customer created successfully',
-        data: created,
+        data: {
+          ...created,
+          customerCode: formatCustomerCode(created.id),
+        },
       });
     } catch (error) {
       req.log.error(error);
@@ -638,8 +663,8 @@ export class AdminController {
           });
         }
 
-        // Notify the Customer with assigned driver info and Pickup OTP
-        if (updated.customerId) {
+        // Notify the Customer ONLY if already accepted (autoAccept), NOT while waiting for driver acceptance
+        if (updated.customerId && assignStatus === 'ACCEPTED') {
           const driverName = updated.driver?.user?.name || 'Your driver';
           const driverPhone = updated.driver?.user?.phone || '';
           const vehicleModel = updated.driver?.assignedVehicle?.model || updated.vehicle?.model || 'Cab';

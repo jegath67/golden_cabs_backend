@@ -55,7 +55,9 @@ export class RidesController {
   async updateStatus(req: FastifyRequest<any>, reply: FastifyReply) {
     const user = req.user as { id: string; role: 'CUSTOMER' | 'DRIVER' | 'ADMIN' };
     const { id } = req.params as { id: string };
-    const { status, cancelReason } = (req.body as any) || {};
+    const body = (req.body as any) || {};
+    const status = body.status;
+    const cancelReason = body.cancelReason || body.reason;
 
     try {
       const updated = await ridesService.updateStatus(id, status, user.role, cancelReason, user.id);

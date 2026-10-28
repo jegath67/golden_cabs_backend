@@ -332,7 +332,7 @@ export class RidesService {
       where: { id: ride.id },
       data: {
         driverId: driver.id,
-        vehicleId: driver.assignedVehicleId,
+        vehicleId: driver.assignedVehicleId || ride.vehicleId,
         status: 'ACCEPTED',
       },
       include: {
@@ -343,6 +343,7 @@ export class RidesService {
             assignedVehicle: true,
           },
         },
+        vehicle: true,
         fareBreakdown: true,
       },
     });
@@ -360,7 +361,12 @@ export class RidesService {
       },
     }).catch((e) => console.error('Customer notification error:', e));
 
-    return updatedRide;
+    return {
+      ...updatedRide,
+      assignedVehicleId: updatedRide.vehicleId || updatedRide.vehicle?.id || updatedRide.driver?.assignedVehicleId || null,
+      assignedVehicleNumber: updatedRide.vehicle?.vehicleNumber || updatedRide.driver?.assignedVehicle?.vehicleNumber || null,
+      assignedVehicleModel: updatedRide.vehicle?.model || updatedRide.driver?.assignedVehicle?.model || null,
+    };
   }
 
   /**
@@ -425,11 +431,19 @@ export class RidesService {
           await couponsService.restoreCoupon(couponCode, tx);
         }
 
+        const resolvedReason =
+          cancelReason ||
+          (actorRole === 'CUSTOMER'
+            ? 'Cancelled by customer'
+            : actorRole === 'DRIVER'
+            ? 'Cancelled by driver'
+            : 'Cancelled by admin');
+
         return tx.ride.update({
           where: { id: ride.id },
           data: {
             status: 'CANCELLED',
-            cancelReason,
+            cancelReason: resolvedReason,
             cancelledBy: actorRole.toLowerCase(),
             stops: couponCode ? { ...metadata, couponRestored: true } : ride.stops as any,
           },
@@ -712,6 +726,9 @@ export class RidesService {
     );
     return {
       ...r,
+      assignedVehicleId: r.vehicleId || r.vehicle?.id || r.driver?.assignedVehicleId || null,
+      assignedVehicleNumber: r.vehicle?.vehicleNumber || r.driver?.assignedVehicle?.vehicleNumber || null,
+      assignedVehicleModel: r.vehicle?.model || r.driver?.assignedVehicle?.model || null,
       tripType: finalTripType,
       isElite,
       category: isElite ? 'ELITE' : (meta.category || 'REGULAR'),
@@ -756,14 +773,28 @@ export class RidesService {
   }
 
   async getDriverRides(driverUserId: string) {
-    const driver = await prisma.driverProfile.findUnique({ where: { userId: driverUserId } });
+    const driver = await prisma.driverProfile.findUnique({
+      where: { userId: driverUserId },
+      include: {
+        assignedVehicle: true,
+        ownedVehicles: { select: { id: true } },
+      },
+    });
     if (!driver) return [];
 
+    const ownedVehicleIds = driver.ownedVehicles?.map((v) => v.id) || [];
+
     const rides = await prisma.ride.findMany({
-      where: { driverId: driver.id },
+      where: {
+        OR: [
+          { driverId: driver.id },
+          ...(ownedVehicleIds.length > 0 ? [{ vehicleId: { in: ownedVehicleIds } }] : []),
+        ],
+      },
       orderBy: { createdAt: 'desc' },
       include: {
         customer: { select: { id: true, name: true, phone: true } },
+        vehicle: true,
         fareBreakdown: true,
       },
     });
@@ -783,6 +814,9 @@ export class RidesService {
       );
       return {
         ...safeRide,
+        assignedVehicleId: safeRide.vehicleId || safeRide.vehicle?.id || driver.assignedVehicleId || null,
+        assignedVehicleNumber: safeRide.vehicle?.vehicleNumber || driver.assignedVehicle?.vehicleNumber || null,
+        assignedVehicleModel: safeRide.vehicle?.model || driver.assignedVehicle?.model || null,
         tripType: finalTripType,
         isElite,
         category: isElite ? 'ELITE' : (meta.category || 'REGULAR'),
@@ -795,12 +829,20 @@ export class RidesService {
    */
   async getAvailableRides(limit = 20, driverUserId?: string) {
     let driverProfileId: string | undefined;
+    let driverAssignedVehicle: any = null;
+    let ownedVehicleIds: string[] = [];
     if (driverUserId) {
       const dp = await prisma.driverProfile.findUnique({
         where: { userId: driverUserId },
-        select: { id: true },
+        select: {
+          id: true,
+          assignedVehicle: true,
+          ownedVehicles: { select: { id: true } },
+        },
       });
       driverProfileId = dp?.id;
+      driverAssignedVehicle = dp?.assignedVehicle;
+      ownedVehicleIds = dp?.ownedVehicles?.map((v) => v.id) || [];
       if (!driverProfileId) {
         // If driver profile does not exist, return empty array immediately
         return [];
@@ -815,15 +857,15 @@ export class RidesService {
     const orConditions: any[] = [];
     if (driverProfileId) {
       orConditions.push({
-        status: TripStatus.SEARCHING,
+        status: { in: [TripStatus.SEARCHING, TripStatus.ACCEPTED, TripStatus.EN_ROUTE, TripStatus.ARRIVED, TripStatus.ONGOING] },
         driverId: driverProfileId,
-        updatedAt: { gte: assignedCutoff },
       });
-      orConditions.push({
-        status: TripStatus.ACCEPTED,
-        driverId: driverProfileId,
-        updatedAt: { gte: assignedCutoff },
-      });
+      if (ownedVehicleIds.length > 0) {
+        orConditions.push({
+          status: { in: [TripStatus.SEARCHING, TripStatus.ACCEPTED, TripStatus.EN_ROUTE, TripStatus.ARRIVED, TripStatus.ONGOING] },
+          vehicleId: { in: ownedVehicleIds },
+        });
+      }
     } else {
       // Internal or Admin view without driver context
       const freshnessCutoff = new Date(Date.now() - 30 * 60 * 1000);
@@ -842,6 +884,7 @@ export class RidesService {
       take: limit,
       include: {
         customer: { select: { id: true, name: true, phone: true } },
+        vehicle: true,
         fareBreakdown: true,
       },
     });
@@ -850,8 +893,8 @@ export class RidesService {
       const meta = (r.stops as any) || {};
       const isScheduled = !!meta.isScheduled && !!meta.scheduledAt;
       // If it is an unassigned scheduled ride, DO NOT broadcast to general driver pool
-      // Admin must assign a driver first.
-      if (isScheduled && !r.driverId) {
+      // Admin must assign a driver or vehicle first.
+      if (isScheduled && !r.driverId && !r.vehicleId) {
         return false;
       }
       return true;
@@ -898,6 +941,9 @@ export class RidesService {
         time: scheduledTimeStr || (r.createdAt
           ? new Date(r.createdAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
           : 'Now'),
+        assignedVehicleId: r.vehicleId || r.vehicle?.id || driverAssignedVehicle?.id || null,
+        assignedVehicleNumber: r.vehicle?.vehicleNumber || driverAssignedVehicle?.vehicleNumber || null,
+        assignedVehicleModel: r.vehicle?.model || driverAssignedVehicle?.model || null,
         pickupLat: r.pickupLat,
         pickupLng: r.pickupLng,
         dropLat: r.dropLat,

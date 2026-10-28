@@ -39,6 +39,11 @@ export class VehiclesService {
             user: { select: { name: true, phone: true } },
           },
         },
+        owner: {
+          include: {
+            user: { select: { name: true, phone: true } },
+          },
+        },
         photos: true,
       },
       orderBy: { createdAt: 'desc' },
@@ -51,6 +56,11 @@ export class VehiclesService {
       include: {
         assignedHub: true,
         assignedDriver: {
+          include: {
+            user: { select: { name: true, phone: true } },
+          },
+        },
+        owner: {
           include: {
             user: { select: { name: true, phone: true } },
           },

@@ -313,6 +313,11 @@ export class DriversService {
     const normalizedPersona =
       data.personaType === 'VEHICLE_ONLY' ? 'RENTAL' : data.personaType;
 
+    const isVehicleOnly =
+      normalizedPersona === 'RENTAL' ||
+      data.personaType === 'VEHICLE_ONLY' ||
+      driver.personaType === 'RENTAL';
+
     return prisma.driverProfile.update({
       where: { userId },
       data: {
@@ -328,7 +333,7 @@ export class DriversService {
         ...(data.panImage ? { panImage: data.panImage } : {}),
         ...(data.selfieImage ? { selfieImage: data.selfieImage } : {}),
         ...(data.assignedHubId ? { assignedHubId: data.assignedHubId } : {}),
-        ...(assignedVehicleId ? { assignedVehicleId } : {}),
+        ...(isVehicleOnly ? { assignedVehicleId: null } : assignedVehicleId ? { assignedVehicleId } : {}),
         approvalStatus: 'PENDING', // Re-triggers pending review upon doc submission
       },
       include: {
