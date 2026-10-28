@@ -15,6 +15,7 @@ export async function adminRoutes(app: FastifyInstance) {
   // Ride Requests Management Endpoints
   app.get('/rides', adminGuard, adminController.getRides.bind(adminController));
   app.get('/rides/:id', adminGuard, adminController.getRideById.bind(adminController));
+  app.get('/rides/:id/eligible-drivers', adminGuard, adminController.getEligibleDrivers.bind(adminController));
   app.patch('/rides/:id/assign', adminGuard, adminController.assignRide.bind(adminController));
 
   // Sub-Admin & Zone Admin Management Endpoints

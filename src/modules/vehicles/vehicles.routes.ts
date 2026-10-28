@@ -26,4 +26,11 @@ export async function vehiclesRoutes(app: FastifyInstance) {
     { preHandler: [requireRoles(['ADMIN', 'DISPATCHER'])] },
     vehiclesController.assignDriver.bind(vehiclesController)
   );
+
+  // Partner or Admin toggle vehicle online availability
+  app.patch(
+    '/:id/availability',
+    { preHandler: [requireRoles(['DRIVER', 'ADMIN', 'DISPATCHER'])] },
+    vehiclesController.toggleAvailability.bind(vehiclesController)
+  );
 }

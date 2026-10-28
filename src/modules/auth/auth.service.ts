@@ -485,7 +485,7 @@ export class AuthService {
     let normalizedPersona: 'DRIVE_ONLY' | 'OWN_VEHICLE' | 'RENTAL' = 'OWN_VEHICLE';
     if (personaType) {
       const upper = personaType.toUpperCase().replace('-', '_');
-      if (upper.includes('RENT')) normalizedPersona = 'RENTAL';
+      if (upper.includes('RENT') || upper.includes('VEHICLE_ONLY') || upper === 'VEHICLEONLY') normalizedPersona = 'RENTAL';
       else if (upper.includes('DRIVE_ONLY') || upper === 'DRIVEONLY') normalizedPersona = 'DRIVE_ONLY';
       else normalizedPersona = 'OWN_VEHICLE';
     }
@@ -547,15 +547,7 @@ export class AuthService {
       throw err;
     }
 
-    // 5. Update personaType if provided, without modifying approvalStatus
-    if (personaType && user.driverProfile.personaType !== normalizedPersona) {
-      await prisma.driverProfile.update({
-        where: { id: user.driverProfile.id },
-        data: { personaType: normalizedPersona },
-      });
-      user.driverProfile.personaType = normalizedPersona;
-    }
-
+    // Persona changes are restricted to authorized Admin workflow and cannot be mutated silently on login.
     return user;
   }
 

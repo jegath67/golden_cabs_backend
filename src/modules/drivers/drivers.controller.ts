@@ -187,6 +187,54 @@ export class DriversController {
       return reply.status(500).send({ success: false, message: 'Failed to fetch vehicle requests', error: String(error) });
     }
   }
+
+  async updateProfile(req: FastifyRequest<any>, reply: FastifyReply) {
+    try {
+      const user = req.user as { id: string };
+      const body = (req.body as { name?: string; email?: string }) || {};
+      const updated = await driversService.updateDriverProfile(user.id, body);
+      return reply.send({ success: true, message: 'Profile updated successfully', data: updated });
+    } catch (error: any) {
+      return reply.status(400).send({ success: false, message: error.message || 'Failed to update profile' });
+    }
+  }
+
+  async getReports(req: FastifyRequest<any>, reply: FastifyReply) {
+    try {
+      const user = req.user as { id: string };
+      const driver = await driversService.getDriverByUserId(user.id);
+      if (!driver) {
+        return reply.status(404).send({ success: false, message: 'Driver profile not found' });
+      }
+      const reports = await driversService.getDriverReports(driver.id);
+      return reply.send({ success: true, data: reports });
+    } catch (error: any) {
+      return reply.status(500).send({ success: false, message: 'Failed to fetch reports', error: String(error) });
+    }
+  }
+
+  async createReport(req: FastifyRequest<any>, reply: FastifyReply) {
+    try {
+      const user = req.user as { id: string };
+      const driver = await driversService.getDriverByUserId(user.id);
+      if (!driver) {
+        return reply.status(404).send({ success: false, message: 'Driver profile not found' });
+      }
+      const { title, subject, category, description } = (req.body as any) || {};
+      const finalTitle = title || subject;
+      if (!finalTitle || !description) {
+        return reply.status(400).send({ success: false, message: 'Title and description are required' });
+      }
+      const report = await driversService.createDriverReport(driver.id, {
+        title: finalTitle,
+        category: category || 'General Support',
+        description,
+      });
+      return reply.status(201).send({ success: true, message: 'Report submitted successfully', data: report });
+    } catch (error: any) {
+      return reply.status(400).send({ success: false, message: error.message || 'Failed to submit report' });
+    }
+  }
 }
 
 export const driversController = new DriversController();

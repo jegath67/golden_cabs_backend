@@ -1,5 +1,6 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { ridesService, type EstimateFareInput } from './rides.service';
+import { prisma } from '../../config/prisma';
 
 export class RidesController {
   async estimateFare(req: FastifyRequest<any>, reply: FastifyReply) {
@@ -52,12 +53,12 @@ export class RidesController {
   }
 
   async updateStatus(req: FastifyRequest<any>, reply: FastifyReply) {
-    const user = req.user as { role: 'CUSTOMER' | 'DRIVER' | 'ADMIN' };
+    const user = req.user as { id: string; role: 'CUSTOMER' | 'DRIVER' | 'ADMIN' };
     const { id } = req.params as { id: string };
     const { status, cancelReason } = (req.body as any) || {};
 
     try {
-      const updated = await ridesService.updateStatus(id, status, user.role, cancelReason);
+      const updated = await ridesService.updateStatus(id, status, user.role, cancelReason, user.id);
       return reply.send({ success: true, message: `Ride updated to ${status}`, data: updated });
     } catch (error: any) {
       return reply.status(400).send({ success: false, message: error.message || 'Failed to update ride status' });
@@ -109,8 +110,15 @@ export class RidesController {
         });
       }
 
-      // If user is DRIVER, strip startOtp to protect customer's secret OTP
+      // If user is DRIVER, ensure driver is assigned to this ride and strip startOtp
       if (user?.role === 'DRIVER') {
+        const dp = await prisma.driverProfile.findUnique({ where: { userId: user.id } });
+        if (!dp || ride.driverId !== dp.id) {
+          return reply.status(403).send({
+            success: false,
+            message: 'Forbidden: You do not have permission to view this ride',
+          });
+        }
         const { startOtp, ...safeRide } = ride;
         return reply.send({ success: true, data: safeRide });
       }

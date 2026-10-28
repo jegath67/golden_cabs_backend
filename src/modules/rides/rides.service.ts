@@ -3,6 +3,12 @@ import { notificationsService } from '../notifications/notifications.service';
 import { TripStatus } from '../../generated/prisma/client';
 import { standardizeTripType } from '../../utils/trip-type.helper';
 
+/**
+ * Permitted window (in minutes) before scheduled pickup time within which a driver can initiate trip start.
+ * Centralized constant to enforce consistent business rules across API and client applications.
+ */
+export const SCHEDULED_START_WINDOW_MINUTES = 30;
+
 export interface EstimateFareInput {
   pickupLat: number;
   pickupLng: number;
@@ -10,6 +16,48 @@ export interface EstimateFareInput {
   dropLng: number;
   tripType?: 'DAILY' | 'RENTAL' | 'OUTSTATION' | 'ONE_WAY' | 'ROUND_TRIP';
   category?: 'BUDGET' | 'PREMIUM' | 'LUXURY';
+}
+
+/**
+ * Robust scheduled pickup time parser supporting standard ISO, formatted date strings
+ * (e.g. "Mon, 27 Oct, 10:30 AM", "27 Oct 2026, 10:30 AM", "yyyy-MM-dd HH:mm"),
+ * and intelligently attaching the current or upcoming year if omitted.
+ */
+export function parseScheduledPickupTime(scheduledAtStr?: string | null): Date | null {
+  if (!scheduledAtStr || !scheduledAtStr.trim() || scheduledAtStr.trim() === 'Pick-up now') {
+    return null;
+  }
+  const raw = scheduledAtStr.trim();
+  const now = new Date();
+  const currentYear = now.getFullYear();
+
+  // 1. Direct standard ISO / Date parse
+  let parsed = new Date(raw);
+  if (!isNaN(parsed.getTime()) && parsed.getFullYear() >= currentYear) {
+    return parsed;
+  }
+
+  // 2. If year was missing (V8 defaults to 2001) or parsing failed:
+  // Remove weekday prefix if present (e.g., 'Mon, ', 'Tue, ')
+  const cleaned = raw.replace(/^[A-Za-z]{3},\s*/, '');
+
+  // Try appending current year: e.g. '27 Oct, 10:30 AM 2026'
+  let withYear = new Date(`${cleaned} ${currentYear}`);
+  if (!isNaN(withYear.getTime())) {
+    // If withYear is in past (e.g. Dec booked in Jan), roll over to next year
+    if (withYear.getTime() < now.getTime() - 86400000) {
+      withYear = new Date(`${cleaned} ${currentYear + 1}`);
+    }
+    return withYear;
+  }
+
+  // Try comma-separated year: '27 Oct 2026, 10:30 AM'
+  const withCommaYear = new Date(cleaned.replace(',', ` ${currentYear},`));
+  if (!isNaN(withCommaYear.getTime())) {
+    return withCommaYear;
+  }
+
+  return null;
 }
 
 export class RidesService {
@@ -92,6 +140,8 @@ export class RidesService {
     seatCapacity?: number;
     requestedVehicle?: string;
     carName?: string;
+    additionalStops?: string[];
+    stops?: any;
   }) {
     const fareEstimate = await this.estimateFare({
       pickupLat: data.pickupLat,
@@ -118,7 +168,38 @@ export class RidesService {
     const bookingCode = `GC-${Math.floor(100000 + Math.random() * 900000)}`;
     const startOtp = Math.floor(1000 + Math.random() * 9000).toString();
 
+    // Validate scheduled pickup time safely
     const isScheduledBooking = !!(data.scheduledAt && data.scheduledAt.trim().length > 0 && data.scheduledAt !== 'Pick-up now');
+    let validatedScheduledAt: string | null = null;
+    let scheduledDisplayStr: string | null = null;
+    if (isScheduledBooking) {
+      const parsedDate = parseScheduledPickupTime(data.scheduledAt);
+      if (!parsedDate || isNaN(parsedDate.getTime())) {
+        throw new Error(`Invalid scheduled pickup time format: "${data.scheduledAt}". Please use standard ISO format.`);
+      }
+      if (parsedDate.getTime() <= Date.now()) {
+        throw new Error('Scheduled pickup time must be in the future');
+      }
+      validatedScheduledAt = parsedDate.toISOString();
+      scheduledDisplayStr = parsedDate.toLocaleDateString('en-GB', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        timeZone: 'Asia/Kolkata',
+      }) + ', ' + parsedDate.toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true,
+        timeZone: 'Asia/Kolkata',
+      });
+    }
+
+    // Preserve intermediate stops (support up to 4 stops)
+    const rawStops = data.additionalStops || (Array.isArray(data.stops) ? data.stops : (data.stops?.additionalStops || []));
+    const cleanStops: string[] = Array.isArray(rawStops)
+      ? rawStops.map((s: any) => String(s).trim()).filter((s: string) => s.length > 0).slice(0, 4)
+      : [];
+
     const seatCap = data.seatCapacity || (data.requestedSeats?.includes('6') || data.requestedVehicle?.includes('6') ? 6 : 4);
     const reqVehicle = data.requestedVehicle || data.requestedSeats || data.carName || (seatCap === 6 ? '6 Seater Cab' : '4 Seater Cab');
 
@@ -162,13 +243,15 @@ export class RidesService {
             ...(data.couponCode
               ? { couponCode: data.couponCode.trim().toUpperCase(), couponRestored: false }
               : {}),
-            scheduledAt: isScheduledBooking ? data.scheduledAt!.trim() : null,
+            scheduledAt: validatedScheduledAt,
+            scheduledDisplay: scheduledDisplayStr,
             isScheduled: isScheduledBooking,
             seatCapacity: seatCap,
             requestedVehicle: reqVehicle,
             customTripType: finalTripType,
             isElite: isElite,
             category: isElite ? 'ELITE' : (data.category || 'REGULAR'),
+            additionalStops: cleanStops,
           },
           fareBreakdown: {
             create: {
@@ -188,41 +271,25 @@ export class RidesService {
       });
     });
 
-    // Notify online drivers in the vicinity ONLY for instant rides
-    // Scheduled rides must be assigned by Admin first
-    if (!isScheduledBooking) {
-      const onlineDrivers = await prisma.driverProfile.findMany({
-        where: {
-          isOnline: true,
-          shiftStatus: 'ON_SHIFT',
-          approvalStatus: 'APPROVED',
-        },
-        select: { userId: true },
-      });
+    // In Admin-controlled dispatch, all requests (instant and scheduled)
+    // are queued for Admin dispatch and availability validation.
+    // Drivers receive assignment notifications ONLY after Admin assigns them.
 
-      for (const driver of onlineDrivers) {
-        notificationsService.sendToUser({
-          userId: driver.userId,
-          title: '🚖 New Ride Request Available!',
-          message: `${data.pickupLocation} ➔ ${data.dropLocation} (₹${fareEstimate.estimatedFare})`,
-          type: 'ride_request',
-          data: {
-            rideId: ride.id,
-            bookingCode: ride.bookingCode,
-            pickupLocation: ride.pickupLocation,
-            dropLocation: ride.dropLocation,
-            distance: `${ride.distanceKm} km`,
-            estimatedFare: `₹${fareEstimate.estimatedFare}`,
-            tripType: finalTripType,
-            isElite: String(isElite),
-            category: isElite ? 'ELITE' : (data.category || 'REGULAR'),
-            paymentMethod: ride.paymentMethod,
-            customerName: ride.customer?.name || 'Customer',
-            customerPhone: ride.customer?.phone || '',
-          },
-        }).catch((e) => console.error('Driver notification error:', e));
-      }
-    }
+    // Send instant booking confirmation with Pickup OTP to the customer
+    notificationsService.sendToUser({
+      userId: customerId,
+      title: isScheduledBooking ? '📅 Ride Scheduled Successfully!' : '🚖 Cab Booking Confirmed!',
+      message: isScheduledBooking
+        ? `Your trip for ${scheduledDisplayStr || 'scheduled time'} is confirmed. Your Pickup OTP is ${startOtp}.`
+        : `Your ride request (${bookingCode}) is confirmed. Your Pickup OTP is ${startOtp}.`,
+      type: 'ride_created',
+      data: {
+        rideId: ride.id,
+        bookingCode,
+        startOtp,
+        isScheduled: String(isScheduledBooking),
+      },
+    }).catch((e) => console.error('Customer ride creation notification error:', e));
 
     return {
       ...ride,
@@ -251,6 +318,12 @@ export class RidesService {
       },
     });
     if (!ride) throw new Error('Ride not found');
+
+    // Strict Admin-Controlled Dispatch: Only the assigned driver can accept this ride
+    if (!ride.driverId || ride.driverId !== driver.id) {
+      throw new Error('Unauthorized: You are not the assigned driver for this ride');
+    }
+
     if (ride.status !== 'SEARCHING' && !(ride.status === 'ACCEPTED' && ride.driverId === driver.id)) {
       throw new Error('Ride is no longer available');
     }
@@ -274,13 +347,17 @@ export class RidesService {
       },
     });
 
-    // Notify Customer that driver accepted
+    // Notify Customer that driver accepted, prominently featuring Pickup OTP
     notificationsService.sendToUser({
       userId: ride.customerId,
       title: '✅ Ride Accepted by Driver!',
-      message: `${updatedRide.driver?.user.name || 'Your driver'} is on the way. Start OTP: ${ride.startOtp}`,
+      message: `${updatedRide.driver?.user.name || 'Your driver'} is on the way. Your Pickup OTP is ${ride.startOtp}. Share with driver to start trip.`,
       type: 'ride_accepted',
-      data: { rideId: ride.id, startOtp: ride.startOtp },
+      data: {
+        rideId: ride.id,
+        bookingCode: ride.bookingCode || '',
+        startOtp: ride.startOtp,
+      },
     }).catch((e) => console.error('Customer notification error:', e));
 
     return updatedRide;
@@ -293,14 +370,37 @@ export class RidesService {
     rideId: string,
     status: 'EN_ROUTE' | 'ARRIVED' | 'CANCELLED',
     actorRole: 'CUSTOMER' | 'DRIVER' | 'ADMIN',
-    cancelReason?: string
+    cancelReason?: string,
+    driverUserId?: string
   ) {
+    const allowedStatuses = ['EN_ROUTE', 'ARRIVED', 'CANCELLED'];
+    if (!allowedStatuses.includes(status)) {
+      throw new Error(`Invalid status: ${status}. Status update only permits EN_ROUTE, ARRIVED, or CANCELLED. Starting a ride requires customer OTP verification via /start.`);
+    }
+
+    const cleanRideId = String(rideId).trim();
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanRideId);
     const ride = await prisma.ride.findFirst({
       where: {
-        OR: [{ id: rideId }, { bookingCode: rideId }],
+        OR: [
+          ...(isUuid ? [{ id: cleanRideId }] : []),
+          { bookingCode: cleanRideId },
+          { bookingCode: cleanRideId.replace(/^GC-/i, '') },
+          { bookingCode: `GC-${cleanRideId.replace(/^GC-/i, '')}` },
+        ],
       },
     });
     if (!ride) throw new Error('Ride not found');
+
+    // Enforce driver ownership on intermediate status updates
+    if (actorRole === 'DRIVER' && driverUserId) {
+      const driver = await prisma.driverProfile.findUnique({
+        where: { userId: driverUserId },
+      });
+      if (!driver || ride.driverId !== driver.id) {
+        throw new Error('Unauthorized: You are not the assigned driver for this ride');
+      }
+    }
 
     // Idempotency: If ride is already cancelled, return cleanly without duplicate operations
     if (status === 'CANCELLED' && ride.status === 'CANCELLED') {
@@ -352,12 +452,17 @@ export class RidesService {
 
     // Notify other party
     if (status === 'ARRIVED') {
+      const driverName = updated.driver?.user?.name || 'Your driver';
       notificationsService.sendToUser({
         userId: ride.customerId,
-        title: '📍 Driver Has Arrived!',
-        message: 'Your cab is waiting at the pickup location. Share OTP to start trip.',
+        title: '📍 Driver Has Arrived at Pickup!',
+        message: `${driverName} has arrived at your pickup spot. Your Pickup OTP is ${ride.startOtp}. Share with driver to begin your trip.`,
         type: 'driver_arrived',
-        data: { rideId },
+        data: {
+          rideId: ride.id,
+          bookingCode: ride.bookingCode || '',
+          startOtp: ride.startOtp || '',
+        },
       }).catch((e) => console.error(e));
     } else if (status === 'CANCELLED') {
       const recipientId = actorRole === 'DRIVER' ? ride.customerId : updated.driver?.userId;
@@ -408,12 +513,32 @@ export class RidesService {
       }
     }
 
-    const validStatuses = ['ACCEPTED', 'EN_ROUTE', 'ARRIVED'];
+    const validStatuses = ['ARRIVED'];
     if (!validStatuses.includes(ride.status)) {
-      throw new Error(`Cannot start ride with current status: ${ride.status}. Ride must be ACCEPTED, EN_ROUTE, or ARRIVED.`);
+      throw new Error(`Cannot start ride with current status: ${ride.status}. Driver must mark ARRIVED at pickup before verifying OTP and starting trip.`);
     }
 
-    if (ride.startOtp !== enteredOtp.trim() && enteredOtp.trim() !== '1234' && enteredOtp.trim() !== '0000') {
+    // Enforce scheduled trip start window (cannot start prematurely)
+    const meta = (ride.stops as any) || {};
+    const isScheduled = !!meta.isScheduled || (typeof meta.scheduledAt === 'string' && meta.scheduledAt.trim().length > 0);
+    if (isScheduled) {
+      const scheduledTimeStr = meta.scheduledAt;
+      if (!scheduledTimeStr || typeof scheduledTimeStr !== 'string' || scheduledTimeStr.trim().length === 0) {
+        throw new Error('Scheduled ride is missing scheduled pickup time');
+      }
+      const scheduledDate = new Date(scheduledTimeStr.trim());
+      if (isNaN(scheduledDate.getTime())) {
+        throw new Error(`Invalid scheduled pickup time format: "${scheduledTimeStr}"`);
+      }
+      const now = new Date();
+      const earliestAllowedStartTime = new Date(scheduledDate.getTime() - SCHEDULED_START_WINDOW_MINUTES * 60 * 1000);
+      if (now < earliestAllowedStartTime) {
+        throw new Error(`Scheduled ride cannot be started earlier than ${SCHEDULED_START_WINDOW_MINUTES} minutes before scheduled pickup time (${scheduledDate.toISOString()})`);
+      }
+    }
+
+    // Require exact customer OTP verification (no hardcoded bypass values)
+    if (ride.startOtp !== enteredOtp.trim()) {
       throw new Error('Invalid OTP. Please check with customer.');
     }
 
@@ -549,9 +674,16 @@ export class RidesService {
   }
 
   async getRideById(rideId: string) {
+    const cleanRideId = String(rideId).trim();
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanRideId);
     const r = await prisma.ride.findFirst({
       where: {
-        OR: [{ id: rideId }, { bookingCode: rideId }],
+        OR: [
+          ...(isUuid ? [{ id: cleanRideId }] : []),
+          { bookingCode: cleanRideId },
+          { bookingCode: cleanRideId.replace(/^GC-/i, '') },
+          { bookingCode: `GC-${cleanRideId.replace(/^GC-/i, '')}` },
+        ],
       },
       include: {
         customer: { select: { id: true, name: true, phone: true } },
@@ -669,15 +801,18 @@ export class RidesService {
         select: { id: true },
       });
       driverProfileId = dp?.id;
+      if (!driverProfileId) {
+        // If driver profile does not exist, return empty array immediately
+        return [];
+      }
     }
 
-    // Live broadcast cutoff: 30 mins. Driver-specific assignments: up to 12 hours.
-    const freshnessCutoff = new Date(Date.now() - 30 * 60 * 1000);
-    const assignedCutoff = new Date(Date.now() - 12 * 60 * 60 * 1000);
+    // Driver-specific assignments window: up to 24 hours
+    const assignedCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-    const orConditions: any[] = [
-      { status: TripStatus.SEARCHING, driverId: null, createdAt: { gte: freshnessCutoff } },
-    ];
+    // CRITICAL: Unassigned rides (driverId == null) are NEVER sent to drivers.
+    // Drivers only receive rides specifically assigned to them by Admin.
+    const orConditions: any[] = [];
     if (driverProfileId) {
       orConditions.push({
         status: TripStatus.SEARCHING,
@@ -690,6 +825,8 @@ export class RidesService {
         updatedAt: { gte: assignedCutoff },
       });
     } else {
+      // Internal or Admin view without driver context
+      const freshnessCutoff = new Date(Date.now() - 30 * 60 * 1000);
       orConditions.push({ status: TripStatus.SEARCHING, createdAt: { gte: freshnessCutoff } });
       orConditions.push({ status: TripStatus.ACCEPTED, createdAt: { gte: freshnessCutoff } });
     }
@@ -765,6 +902,8 @@ export class RidesService {
         pickupLng: r.pickupLng,
         dropLat: r.dropLat,
         dropLng: r.dropLng,
+        stops: meta.additionalStops || meta.stops || [],
+        additionalStops: meta.additionalStops || [],
         createdAt: r.createdAt,
       };
     });

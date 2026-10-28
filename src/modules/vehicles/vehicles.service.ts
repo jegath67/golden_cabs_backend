@@ -7,14 +7,29 @@ export class VehiclesService {
     type?: 'SEDAN' | 'SUV' | 'HATCHBACK' | 'LUXURY' | 'AUTO';
     status?: 'PENDING' | 'VERIFIED' | 'REJECTED' | 'MAINTENANCE';
     hubId?: string;
+    ownerId?: string;
+    assignedVehicleId?: string;
     unassignedOnly?: boolean;
   }) {
+    const ownershipConditions: any[] = [];
+    if (filters?.ownerId) {
+      ownershipConditions.push({ ownerId: filters.ownerId });
+    }
+    if (filters?.assignedVehicleId) {
+      ownershipConditions.push({ id: filters.assignedVehicleId });
+    }
+
     return prisma.vehicle.findMany({
       where: {
         ...(filters?.category ? { category: filters.category } : {}),
         ...(filters?.type ? { vehicleType: filters.type } : {}),
         ...(filters?.status ? { status: filters.status } : {}),
         ...(filters?.hubId ? { assignedHubId: filters.hubId } : {}),
+        ...(ownershipConditions.length > 1
+          ? { OR: ownershipConditions }
+          : ownershipConditions.length === 1
+          ? ownershipConditions[0]
+          : {}),
         ...(filters?.unassignedOnly ? { assignedDriver: null } : {}),
       },
       include: {
@@ -61,7 +76,14 @@ export class VehiclesService {
     insuranceNumber?: string;
     ownerId?: string;
     assignedHubId?: string;
+    photos?: string[];
+    vehiclePhoto?: string;
   }) {
+    const photoUrls = [
+      ...(data.photos || []),
+      ...(data.vehiclePhoto ? [data.vehiclePhoto] : []),
+    ].filter((p): p is string => typeof p === 'string' && p.trim().length > 0);
+
     return prisma.vehicle.create({
       data: {
         vehicleNumber: data.vehicleNumber.toUpperCase().trim(),
@@ -79,6 +101,20 @@ export class VehiclesService {
         insuranceNumber: data.insuranceNumber,
         ownerId: data.ownerId,
         assignedHubId: data.assignedHubId,
+        ...(photoUrls.length > 0
+          ? {
+              photos: {
+                create: photoUrls.map((url, i) => ({
+                  photoUrl: url,
+                  tag: i === 0 ? 'front' : 'extra',
+                })),
+              },
+            }
+          : {}),
+      },
+      include: {
+        photos: true,
+        assignedHub: true,
       },
     });
   }
@@ -87,6 +123,36 @@ export class VehiclesService {
     return prisma.vehicle.update({
       where: { id },
       data: { status },
+    });
+  }
+
+  async toggleVehicleAvailability(vehicleId: string, isOnline: boolean) {
+    const vehicle = await prisma.vehicle.findUnique({
+      where: { id: vehicleId },
+    });
+    if (!vehicle) {
+      throw new Error('Vehicle not found');
+    }
+
+    if (!isOnline) {
+      // Check if vehicle has any active rides
+      const activeRide = await prisma.ride.findFirst({
+        where: {
+          vehicleId: vehicle.id,
+          status: { in: ['SEARCHING', 'ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] },
+        },
+      });
+
+      if (activeRide) {
+        throw new Error(
+          `Cannot mark vehicle unavailable while a ride (${activeRide.bookingCode}) is currently in progress`
+        );
+      }
+    }
+
+    return prisma.vehicle.update({
+      where: { id: vehicleId },
+      data: { isOnline },
     });
   }
 

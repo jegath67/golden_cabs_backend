@@ -33,11 +33,132 @@ export class DriversService {
       }
     }
 
+    const clean = driver.id.replace(/-/g, '').toUpperCase();
+    const suffix = clean.length >= 5 ? clean.substring(0, 5) : clean.padStart(4, '0');
+    const driverCode = `DRV-${suffix}`;
+
     return {
       ...driver,
+      driverCode,
       isVehicleRequestPending,
       pendingVehicleRequest,
     };
+  }
+
+  async updateDriverProfile(
+    userId: string,
+    data: { name?: string; email?: string }
+  ) {
+    const driver = await prisma.driverProfile.findUnique({
+      where: { userId },
+      include: { user: true },
+    });
+    if (!driver) {
+      throw new Error('Driver profile not found');
+    }
+
+    const userUpdates: { name?: string; email?: string | null } = {};
+
+    if (data.name !== undefined) {
+      const trimmed = data.name.trim();
+      if (!trimmed) throw new Error('Name cannot be empty');
+      userUpdates.name = trimmed;
+    }
+
+    if (data.email !== undefined) {
+      const trimmedEmail = data.email ? data.email.trim().toLowerCase() : '';
+      if (trimmedEmail) {
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(trimmedEmail)) {
+          throw new Error('Invalid email address format');
+        }
+        if (trimmedEmail !== driver.user.email) {
+          const existing = await prisma.user.findUnique({ where: { email: trimmedEmail } });
+          if (existing && existing.id !== userId) {
+            const err: any = new Error('Email is already registered with another account');
+            err.statusCode = 409;
+            throw err;
+          }
+        }
+        userUpdates.email = trimmedEmail;
+      } else {
+        userUpdates.email = null;
+      }
+    }
+
+    if (Object.keys(userUpdates).length > 0) {
+      await prisma.user.update({
+        where: { id: userId },
+        data: userUpdates,
+      });
+    }
+
+    return this.getDriverByUserId(userId);
+  }
+
+  async getDriverReports(driverProfileId: string) {
+    try {
+      await prisma.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS "DriverReport" (
+          "id" TEXT PRIMARY KEY,
+          "driverProfileId" TEXT NOT NULL,
+          "title" TEXT NOT NULL,
+          "category" TEXT NOT NULL,
+          "description" TEXT NOT NULL,
+          "status" TEXT NOT NULL DEFAULT 'In Progress',
+          "response" TEXT,
+          "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS "DriverReport_driverProfileId_idx" ON "DriverReport"("driverProfileId");
+      `);
+
+      const reports = await prisma.$queryRawUnsafe<any[]>(
+        `SELECT * FROM "DriverReport" WHERE "driverProfileId" = $1 ORDER BY "createdAt" DESC`,
+        driverProfileId
+      );
+      return reports;
+    } catch (error) {
+      console.error('Error fetching driver reports:', error);
+      return [];
+    }
+  }
+
+  async createDriverReport(
+    driverProfileId: string,
+    data: { title: string; category: string; description: string }
+  ) {
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "DriverReport" (
+        "id" TEXT PRIMARY KEY,
+        "driverProfileId" TEXT NOT NULL,
+        "title" TEXT NOT NULL,
+        "category" TEXT NOT NULL,
+        "description" TEXT NOT NULL,
+        "status" TEXT NOT NULL DEFAULT 'In Progress',
+        "response" TEXT,
+        "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS "DriverReport_driverProfileId_idx" ON "DriverReport"("driverProfileId");
+    `);
+
+    const id = `REP-${Date.now().toString().slice(-4)}${Math.floor(10 + Math.random() * 90)}`;
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "DriverReport" ("id", "driverProfileId", "title", "category", "description", "status", "createdAt", "updatedAt")
+       VALUES ($1, $2, $3, $4, $5, 'In Progress', NOW(), NOW())`,
+      id,
+      driverProfileId,
+      data.title.trim(),
+      data.category.trim(),
+      data.description.trim()
+    );
+
+    const created = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT * FROM "DriverReport" WHERE "id" = $1`,
+      id
+    );
+    return created[0];
   }
 
   async updateKycDocuments(
@@ -45,7 +166,7 @@ export class DriversService {
     data: {
       name?: string;
       email?: string;
-      personaType?: 'DRIVE_ONLY' | 'OWN_VEHICLE' | 'RENTAL';
+      personaType?: 'DRIVE_ONLY' | 'OWN_VEHICLE' | 'RENTAL' | 'VEHICLE_ONLY';
       licenseNumber?: string;
       licenseExpiry?: string;
       licenseFront?: string;
@@ -153,12 +274,30 @@ export class DriversService {
         });
         assignedVehicleId = created.id;
       }
+
+      if (data.vehicle.vehiclePhoto && assignedVehicleId) {
+        const existingPhoto = await prisma.vehiclePhoto.findFirst({
+          where: { vehicleId: assignedVehicleId, photoUrl: data.vehicle.vehiclePhoto },
+        });
+        if (!existingPhoto) {
+          await prisma.vehiclePhoto.create({
+            data: {
+              vehicleId: assignedVehicleId,
+              photoUrl: data.vehicle.vehiclePhoto,
+              tag: 'front',
+            },
+          });
+        }
+      }
     }
+
+    const normalizedPersona =
+      data.personaType === 'VEHICLE_ONLY' ? 'RENTAL' : data.personaType;
 
     return prisma.driverProfile.update({
       where: { userId },
       data: {
-        ...(data.personaType ? { personaType: data.personaType } : {}),
+        ...(normalizedPersona ? { personaType: normalizedPersona } : {}),
         ...(data.licenseNumber ? { licenseNumber: data.licenseNumber } : {}),
         ...(data.licenseExpiry ? { licenseExpiry: data.licenseExpiry } : {}),
         ...(data.licenseFront ? { licenseFront: data.licenseFront } : {}),
@@ -187,15 +326,38 @@ export class DriversService {
 
     const driver = await prisma.driverProfile.findUnique({
       where: { userId },
-      include: { assignedVehicle: true },
+      include: {
+        assignedVehicle: true,
+        ownedVehicles: true,
+      },
     });
 
     if (!driver) {
       throw new Error('Driver profile not found');
     }
 
-    if (isOnline && driver.personaType === 'DRIVE_ONLY' && !driver.assignedVehicleId) {
-      throw new Error('Vehicle allocation required from Hub before starting shift and going online');
+    if (isOnline) {
+      if (driver.personaType === 'DRIVE_ONLY') {
+        if (!driver.assignedVehicleId || !driver.assignedVehicle) {
+          throw new Error('Vehicle allocation required from Hub before starting shift and going online');
+        }
+      } else if (driver.personaType === 'OWN_VEHICLE') {
+        const verifiedOwned = driver.ownedVehicles?.find((v) => v.status === 'VERIFIED');
+        const hasVerifiedAssigned = driver.assignedVehicle && driver.assignedVehicle.status === 'VERIFIED';
+        if (!hasVerifiedAssigned && !verifiedOwned) {
+          throw new Error('Approved and verified personal vehicle required before starting shift and going online');
+        }
+        if (!driver.assignedVehicleId && verifiedOwned) {
+          await prisma.driverProfile.update({
+            where: { id: driver.id },
+            data: { assignedVehicleId: verifiedOwned.id },
+          });
+        }
+      } else if (driver.personaType === 'RENTAL') {
+        if (!driver.assignedVehicleId || !driver.assignedVehicle) {
+          throw new Error('Active rental vehicle allocation required before starting shift and going online');
+        }
+      }
     }
 
     return prisma.driverProfile.update({
@@ -272,13 +434,16 @@ export class DriversService {
   async getAllDrivers(filters?: {
     approvalStatus?: 'PENDING' | 'APPROVED' | 'REJECTED';
     shiftStatus?: 'ON_SHIFT' | 'OFF_SHIFT';
-    personaType?: 'DRIVE_ONLY' | 'OWN_VEHICLE' | 'RENTAL';
+    personaType?: 'DRIVE_ONLY' | 'OWN_VEHICLE' | 'RENTAL' | 'VEHICLE_ONLY';
   }) {
+    const personaFilter =
+      filters?.personaType === 'VEHICLE_ONLY' ? 'RENTAL' : filters?.personaType;
+
     const list = await prisma.driverProfile.findMany({
       where: {
         ...(filters?.approvalStatus ? { approvalStatus: filters.approvalStatus } : {}),
         ...(filters?.shiftStatus ? { shiftStatus: filters.shiftStatus } : {}),
-        ...(filters?.personaType ? { personaType: filters.personaType } : {}),
+        ...(personaFilter ? { personaType: personaFilter } : {}),
       },
       include: {
         user: { select: { id: true, name: true, phone: true, email: true } },
@@ -305,7 +470,7 @@ export class DriversService {
     approvalStatus: 'APPROVED' | 'REJECTED',
     rejectionReason?: string
   ) {
-    return prisma.driverProfile.update({
+    const driver = await prisma.driverProfile.update({
       where: { id: driverProfileId },
       data: {
         approvalStatus,
@@ -315,6 +480,23 @@ export class DriversService {
         user: true,
       },
     });
+
+    if (approvalStatus === 'APPROVED') {
+      await prisma.vehicle.updateMany({
+        where: {
+          OR: [
+            { ownerId: driverProfileId },
+            ...(driver.assignedVehicleId ? [{ id: driver.assignedVehicleId }] : []),
+          ],
+        },
+        data: {
+          status: 'VERIFIED',
+          ownerId: driverProfileId,
+        },
+      });
+    }
+
+    return driver;
   }
 
   async requestVehicle(userId: string, notes?: string) {
@@ -394,7 +576,14 @@ export class DriversService {
       return [];
     });
 
-    return requests;
+    return requests.map((r) => {
+      const clean = (r.driverId || '').replace(/-/g, '').toUpperCase();
+      const suffix = clean.length >= 5 ? clean.substring(0, 5) : clean.padStart(4, '0');
+      return {
+        ...r,
+        driverCode: `DRV-${suffix}`,
+      };
+    });
   }
 }
 

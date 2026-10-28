@@ -1,6 +1,7 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { prisma } from '../../config/prisma';
 import { standardizeTripType } from '../../utils/trip-type.helper';
+import { driverAvailabilityService } from '../rides/driver-availability.service';
 
 function formatDriverCode(driverId?: string | null): string | null {
   if (!driverId) return null;
@@ -43,7 +44,25 @@ function formatRideResponse(r: any) {
   const fareNum = r.fareBreakdown?.totalFare ?? r.estimatedFare ?? 0;
   const distNum = r.distanceKm ?? 0;
 
-  const scheduledDateStr = meta.scheduledAt ? String(meta.scheduledAt) : '';
+  let scheduledDateStr = meta.scheduledDisplay ? String(meta.scheduledDisplay) : '';
+  if (!scheduledDateStr && meta.scheduledAt) {
+    const sDate = new Date(meta.scheduledAt);
+    if (!isNaN(sDate.getTime())) {
+      scheduledDateStr = sDate.toLocaleDateString('en-GB', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        timeZone: 'Asia/Kolkata',
+      }) + ', ' + sDate.toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true,
+        timeZone: 'Asia/Kolkata',
+      });
+    } else {
+      scheduledDateStr = String(meta.scheduledAt);
+    }
+  }
   const createdDateStr = r.createdAt ? r.createdAt.toISOString().replace('T', ' ').substring(0, 16) : '';
   const finalDatetime = scheduledDateStr || createdDateStr;
 
@@ -88,8 +107,9 @@ function formatRideResponse(r: any) {
     startOtp: r.startOtp,
     isLive: ['SEARCHING', 'ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'].includes(r.status),
     assignmentMode: 'Manual',
-    matchScore: 90,
-    stops: [],
+    stops: Array.isArray(meta.additionalStops)
+      ? meta.additionalStops
+      : (Array.isArray(meta.stops) ? meta.stops : []),
     dispatchTimeline: [
       {
         time: r.createdAt ? r.createdAt.toTimeString().substring(0, 5) : '',
@@ -400,12 +420,41 @@ export class AdminController {
   }
 
   /**
-   * Assign driver (and optional vehicle) to a ride request
+   * Query candidate drivers and their live availability for a specific ride request
+   */
+  async getEligibleDrivers(req: FastifyRequest, reply: FastifyReply) {
+    try {
+      const { id } = req.params as { id: string };
+      const result = await driverAvailabilityService.getCandidateDriversForRide(id);
+      return reply.send({
+        success: true,
+        data: result,
+      });
+    } catch (error: any) {
+      req.log.error(error);
+      const isNotFound = String(error.message || '').toLowerCase().includes('not found');
+      return reply.status(isNotFound ? 404 : 500).send({
+        success: false,
+        message: error.message || 'Failed to retrieve candidate drivers',
+      });
+    }
+  }
+
+  /**
+   * Assign driver (and optional vehicle) to a ride request with full availability validation
+   * and database concurrency protection to prevent double-booking.
    */
   async assignRide(req: FastifyRequest, reply: FastifyReply) {
     try {
       const { id } = req.params as { id: string };
       const { driverId, vehicleId } = (req.body as any) || {};
+
+      if (!driverId) {
+        return reply.status(400).send({
+          success: false,
+          message: 'driverId is required for manual assignment',
+        });
+      }
 
       // 1. Locate ride by id or bookingCode
       const rawId = String(id).trim();
@@ -419,127 +468,202 @@ export class AdminController {
             { bookingCode: cleanId },
           ],
         },
+        include: {
+          fareBreakdown: true,
+        },
       });
 
       if (!ride) {
         return reply.status(404).send({ success: false, message: 'Ride not found' });
       }
 
-      // 2. Validate / locate driver
-      let finalDriverId: string | null = null;
-      let finalVehicleId: string | null = null;
-
-      if (driverId) {
-        const rawStr = String(driverId).trim();
-        const cleanDriverId = rawStr
-          .replace(/^GC-/i, '')
-          .replace(/^DRV-/i, '')
-          .replace(/-/g, '')
-          .toLowerCase();
-
-        const allDrivers = await prisma.driverProfile.findMany({
-          include: { assignedVehicle: true, user: true },
+      if (ride.status === 'COMPLETED' || ride.status === 'CANCELLED') {
+        return reply.status(400).send({
+          success: false,
+          message: `Cannot assign driver to a ${ride.status.toLowerCase()} ride`,
         });
+      }
 
-        const matched = allDrivers.find((d) => {
-          const dCleanId = d.id.replace(/-/g, '').toLowerCase();
-          const dCleanUserId = d.userId ? d.userId.replace(/-/g, '').toLowerCase() : '';
-          return (
-            d.id === rawStr ||
-            d.id === driverId ||
-            d.userId === rawStr ||
-            d.user?.id === rawStr ||
-            d.user?.phone === rawStr ||
-            dCleanId === cleanDriverId ||
-            dCleanId.startsWith(cleanDriverId) ||
-            cleanDriverId.startsWith(dCleanId.substring(0, 5)) ||
-            (dCleanUserId && dCleanUserId.startsWith(cleanDriverId))
-          );
+      // 2. Locate candidate driver strictly (NO silent fallback to first driver!)
+      const rawStr = String(driverId).trim();
+      const cleanDriverId = rawStr
+        .replace(/^GC-/i, '')
+        .replace(/^DRV-/i, '')
+        .replace(/-/g, '')
+        .toLowerCase();
+
+      const allDrivers = await prisma.driverProfile.findMany({
+        include: { assignedVehicle: true, user: true, ownedVehicles: true },
+      });
+
+      const matchedDriver = allDrivers.find((d) => {
+        const dCleanId = d.id.replace(/-/g, '').toLowerCase();
+        const dCleanUserId = d.userId ? d.userId.replace(/-/g, '').toLowerCase() : '';
+        return (
+          d.id === rawStr ||
+          d.id === driverId ||
+          d.userId === rawStr ||
+          d.user?.id === rawStr ||
+          d.user?.phone === rawStr ||
+          dCleanId === cleanDriverId ||
+          dCleanId.startsWith(cleanDriverId) ||
+          cleanDriverId.startsWith(dCleanId.substring(0, 5)) ||
+          (dCleanUserId && dCleanUserId.startsWith(cleanDriverId))
+        );
+      });
+
+      if (!matchedDriver) {
+        return reply.status(404).send({
+          success: false,
+          message: `Driver "${driverId}" not found. Manual dispatch requires a valid registered driver.`,
         });
+      }
 
-        if (matched) {
-          finalDriverId = matched.id;
-          finalVehicleId = vehicleId || matched.assignedVehicleId || matched.assignedVehicle?.id || null;
-        } else {
-          const firstDriver = allDrivers[0];
-          if (firstDriver) {
-            finalDriverId = firstDriver.id;
-            finalVehicleId = vehicleId || firstDriver.assignedVehicleId || null;
-          }
-        }
+      const finalDriverId = matchedDriver.id;
+      const finalVehicleId = vehicleId || matchedDriver.assignedVehicleId || matchedDriver.assignedVehicle?.id || null;
+
+      // 3. Centralized Driver Availability & Time-Conflict Validation
+      const targetRide = driverAvailabilityService.extractRideTarget(ride);
+      const availability = await driverAvailabilityService.evaluateDriverAvailability(finalDriverId, targetRide);
+
+      if (!availability.isAvailable) {
+        return reply.status(409).send({
+          success: false,
+          message: availability.reasonMessage || 'Driver is unavailable due to an active trip or schedule conflict',
+          reasonCode: availability.reasonCode,
+          conflictDetails: {
+            reasonCode: availability.reasonCode,
+            reasonMessage: availability.reasonMessage,
+            activeTripId: availability.activeTripId,
+            conflictingTripId: availability.conflictingTripId,
+            expectedFreeTime: availability.expectedFreeTime,
+          },
+        });
       }
 
       const assignStatus = (req.body as any)?.autoAccept ? 'ACCEPTED' : 'SEARCHING';
 
-      const updated = await prisma.ride.update({
-        where: { id: ride.id },
-        data: {
-          driverId: finalDriverId,
-          vehicleId: finalVehicleId,
-          status: assignStatus,
-        },
-        include: {
-          customer: { select: { id: true, name: true, phone: true } },
-          driver: {
-            include: {
-              user: { select: { name: true, phone: true } },
-              assignedVehicle: true,
-            },
+      // 4. Concurrency Protection: Re-evaluate and persist inside database transaction
+      const updated = await prisma.$transaction(async (tx) => {
+        const currentRide = await tx.ride.findUnique({
+          where: { id: ride.id },
+          select: { id: true, status: true, driverId: true },
+        });
+
+        if (!currentRide) {
+          throw new Error('Ride not found');
+        }
+
+        if (currentRide.status === 'COMPLETED' || currentRide.status === 'CANCELLED') {
+          throw new Error(`Ride status is already ${currentRide.status}`);
+        }
+
+        // Concurrency re-check: verify driver has not been concurrently assigned to an overlapping trip
+        const recheckAvailability = await driverAvailabilityService.evaluateDriverAvailability(
+          finalDriverId,
+          targetRide
+        );
+        if (!recheckAvailability.isAvailable) {
+          throw new Error(`CONCURRENCY_CONFLICT: ${recheckAvailability.reasonMessage}`);
+        }
+
+        return tx.ride.update({
+          where: { id: ride.id },
+          data: {
+            driverId: finalDriverId,
+            vehicleId: finalVehicleId,
+            status: assignStatus,
           },
-          vehicle: true,
-          fareBreakdown: true,
-        },
+          include: {
+            customer: { select: { id: true, name: true, phone: true } },
+            driver: {
+              include: {
+                user: { select: { name: true, phone: true } },
+                assignedVehicle: true,
+              },
+            },
+            vehicle: true,
+            fareBreakdown: true,
+          },
+        });
       });
 
-      // Send push notification to assigned Driver
-      if (finalDriverId) {
-        try {
-          const { notificationsService } = await import('../notifications/notifications.service');
-          const dp = await prisma.driverProfile.findUnique({
-            where: { id: finalDriverId },
-            select: { userId: true },
+      // 5. Send push notifications:
+      // a) To the assigned Driver to alert them of the assigned trip
+      // b) To the Customer informing them of driver details and their Pickup OTP
+      try {
+        const { notificationsService } = await import('../notifications/notifications.service');
+        const smartCode = updated.bookingCode || `GC-${updated.id.replace(/-/g, '').substring(0, 6).toUpperCase()}`;
+        const pickupOtp = updated.startOtp || '';
+
+        const dp = await prisma.driverProfile.findUnique({
+          where: { id: finalDriverId },
+          select: { userId: true },
+        });
+        if (dp?.userId) {
+          await notificationsService.sendToUser({
+            userId: dp.userId,
+            title: '🚖 New Trip Assigned!',
+            message: `You have been assigned ride ${smartCode}. Open app to accept.`,
+            type: 'ride_assigned',
+            data: {
+              rideId: updated.id,
+              bookingCode: smartCode,
+              pickupLocation: updated.pickupLocation,
+              pickupAddress: updated.pickupAddress || updated.pickupLocation,
+              dropLocation: updated.dropLocation,
+              dropAddress: updated.dropAddress || updated.dropLocation,
+              distance: `${updated.distanceKm} km`,
+              estimatedFare: `₹${Math.round(updated.fareBreakdown?.totalFare ?? updated.estimatedFare ?? 0)}`,
+              tripType: standardizeTripType({
+                customTripType: (updated.stops as any)?.customTripType,
+                tripType: updated.tripType,
+                distanceKm: updated.distanceKm,
+              }),
+              isElite: String(!!(
+                (updated.stops as any)?.isElite ||
+                (updated.stops as any)?.category === 'ELITE' ||
+                (updated.stops as any)?.requestedVehicle?.toLowerCase().includes('elite') ||
+                updated.tripType?.toLowerCase().includes('elite')
+              )),
+              paymentMethod: updated.paymentMethod,
+              customerName: updated.customer?.name || 'Customer',
+              customerPhone: updated.customer?.phone || '',
+              startOtp: pickupOtp,
+              pickupLat: String(updated.pickupLat ?? 11.9360),
+              pickupLng: String(updated.pickupLng ?? 79.8174),
+              dropLat: String(updated.dropLat ?? 11.9680),
+              dropLng: String(updated.dropLng ?? 79.8105),
+            },
           });
-          if (dp?.userId) {
-            const smartCode = updated.bookingCode || `GC-${updated.id.replace(/-/g, '').substring(0, 6).toUpperCase()}`;
-            await notificationsService.sendToUser({
-              userId: dp.userId,
-              title: '🚖 New Trip Assigned!',
-              message: `You have been assigned ride ${smartCode}. Open app to accept.`,
-              type: 'ride_assigned',
-              data: {
-                rideId: updated.id,
-                bookingCode: smartCode,
-                pickupLocation: updated.pickupLocation,
-                pickupAddress: updated.pickupAddress || updated.pickupLocation,
-                dropLocation: updated.dropLocation,
-                dropAddress: updated.dropAddress || updated.dropLocation,
-                distance: `${updated.distanceKm} km`,
-                estimatedFare: `₹${Math.round(updated.fareBreakdown?.totalFare ?? updated.estimatedFare ?? 0)}`,
-                tripType: standardizeTripType({
-                  customTripType: (updated.stops as any)?.customTripType,
-                  tripType: updated.tripType,
-                  distanceKm: updated.distanceKm,
-                }),
-                isElite: String(!!(
-                  (updated.stops as any)?.isElite ||
-                  (updated.stops as any)?.category === 'ELITE' ||
-                  (updated.stops as any)?.requestedVehicle?.toLowerCase().includes('elite') ||
-                  updated.tripType?.toLowerCase().includes('elite')
-                )),
-                paymentMethod: updated.paymentMethod,
-                customerName: updated.customer?.name || 'Customer',
-                customerPhone: updated.customer?.phone || '',
-                startOtp: updated.startOtp || '',
-                pickupLat: String(updated.pickupLat ?? 11.9360),
-                pickupLng: String(updated.pickupLng ?? 79.8174),
-                dropLat: String(updated.dropLat ?? 11.9680),
-                dropLng: String(updated.dropLng ?? 79.8105),
-              },
-            });
-          }
-        } catch (e) {
-          req.log.warn('Failed to send driver notification: ' + e);
         }
+
+        // Notify the Customer with assigned driver info and Pickup OTP
+        if (updated.customerId) {
+          const driverName = updated.driver?.user?.name || 'Your driver';
+          const driverPhone = updated.driver?.user?.phone || '';
+          const vehicleModel = updated.driver?.assignedVehicle?.model || updated.vehicle?.model || 'Cab';
+          const vehicleNumber = updated.driver?.assignedVehicle?.vehicleNumber || updated.vehicle?.vehicleNumber || '';
+          const vehicleInfo = vehicleNumber ? `${vehicleModel} (${vehicleNumber})` : vehicleModel;
+
+          await notificationsService.sendToUser({
+            userId: updated.customerId,
+            title: '🚖 Driver Assigned & Confirmed!',
+            message: `${driverName} (${vehicleInfo}) has been assigned. Your Pickup OTP is ${pickupOtp}. Share with driver when boarding.`,
+            type: 'driver_assigned',
+            data: {
+              rideId: updated.id,
+              bookingCode: smartCode,
+              startOtp: pickupOtp,
+              driverName,
+              driverPhone,
+              vehicleModel,
+              vehicleNumber,
+            },
+          });
+        }
+      } catch (e) {
+        req.log.warn('Failed to send assignment notifications: ' + e);
       }
 
       return reply.send({
@@ -547,11 +671,13 @@ export class AdminController {
         message: 'Driver assigned successfully',
         data: formatRideResponse(updated),
       });
-    } catch (error) {
+    } catch (error: any) {
       req.log.error(error);
-      return reply.status(500).send({
+      const isConcurrencyConflict = String(error.message || '').includes('CONCURRENCY_CONFLICT');
+      const statusCode = isConcurrencyConflict ? 409 : 500;
+      return reply.status(statusCode).send({
         success: false,
-        message: 'Failed to assign driver',
+        message: error.message || 'Failed to assign driver',
         error: String(error),
       });
     }

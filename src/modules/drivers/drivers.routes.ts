@@ -16,6 +16,24 @@ export async function driversRoutes(app: FastifyInstance) {
     driversController.updateKyc.bind(driversController)
   );
 
+  app.patch(
+    '/profile',
+    { preHandler: [requireRoles(['DRIVER'])] },
+    driversController.updateProfile.bind(driversController)
+  );
+
+  app.get(
+    '/reports',
+    { preHandler: [requireRoles(['DRIVER'])] },
+    driversController.getReports.bind(driversController)
+  );
+
+  app.post(
+    '/reports',
+    { preHandler: [requireRoles(['DRIVER'])] },
+    driversController.createReport.bind(driversController)
+  );
+
   app.post(
     '/shift',
     { preHandler: [requireRoles(['DRIVER'])] },
