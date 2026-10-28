@@ -7,8 +7,12 @@ export class DriversService {
       include: {
         user: { select: { id: true, name: true, phone: true, email: true } },
         assignedHub: true,
-        assignedVehicle: true,
-        ownedVehicles: true,
+        assignedVehicle: {
+          include: { photos: true },
+        },
+        ownedVehicles: {
+          include: { photos: true },
+        },
         wallet: true,
       },
     });
@@ -37,11 +41,26 @@ export class DriversService {
     const suffix = clean.length >= 5 ? clean.substring(0, 5) : clean.padStart(4, '0');
     const driverCode = `DRV-${suffix}`;
 
+    const attachVehiclePhotos = (v: any) => {
+      if (!v) return v;
+      const photoUrl = v.photos && v.photos.length > 0 ? v.photos[0].photoUrl : null;
+      return {
+        ...v,
+        image: photoUrl,
+        imageUrl: photoUrl,
+        vehiclePhoto: photoUrl,
+      };
+    };
+
     return {
       ...driver,
       driverCode,
       isVehicleRequestPending,
       pendingVehicleRequest,
+      assignedVehicle: attachVehiclePhotos(driver.assignedVehicle),
+      ownedVehicles: Array.isArray(driver.ownedVehicles)
+        ? driver.ownedVehicles.map(attachVehiclePhotos)
+        : [],
     };
   }
 
@@ -448,12 +467,27 @@ export class DriversService {
       include: {
         user: { select: { id: true, name: true, phone: true, email: true } },
         assignedHub: true,
-        assignedVehicle: true,
-        ownedVehicles: true,
+        assignedVehicle: {
+          include: { photos: true },
+        },
+        ownedVehicles: {
+          include: { photos: true },
+        },
         wallet: true,
       },
       orderBy: { createdAt: 'desc' },
     });
+
+    const attachVehiclePhotos = (v: any) => {
+      if (!v) return v;
+      const photoUrl = v.photos && v.photos.length > 0 ? v.photos[0].photoUrl : null;
+      return {
+        ...v,
+        image: photoUrl,
+        imageUrl: photoUrl,
+        vehiclePhoto: photoUrl,
+      };
+    };
 
     return list.map((d) => {
       const clean = d.id.replace(/-/g, '').toUpperCase();
@@ -461,6 +495,10 @@ export class DriversService {
       return {
         ...d,
         driverCode: `DRV-${suffix}`,
+        assignedVehicle: attachVehiclePhotos(d.assignedVehicle),
+        ownedVehicles: Array.isArray(d.ownedVehicles)
+          ? d.ownedVehicles.map(attachVehiclePhotos)
+          : [],
       };
     });
   }
