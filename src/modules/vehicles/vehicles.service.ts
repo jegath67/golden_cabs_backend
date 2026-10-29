@@ -94,7 +94,7 @@ export class VehiclesService {
       ...(data.vehiclePhoto ? [data.vehiclePhoto] : []),
     ].filter((p): p is string => typeof p === 'string' && p.trim().length > 0);
 
-    return prisma.vehicle.create({
+    const created = await prisma.vehicle.create({
       data: {
         vehicleNumber: data.vehicleNumber.toUpperCase().trim(),
         brand: data.brand,
@@ -125,15 +125,66 @@ export class VehiclesService {
       include: {
         photos: true,
         assignedHub: true,
+        owner: { select: { userId: true, user: { select: { name: true, phone: true } } } },
       },
     });
+
+    // 1. Notify Partner/Owner if ownerId exists
+    if (created.owner?.userId) {
+      await notificationsService.sendToUser({
+        userId: created.owner.userId,
+        title: '🚙 Vehicle Submitted for Approval',
+        message: `${created.brand} ${created.model} (${created.vehicleNumber}) has been submitted for admin verification.`,
+        type: 'vehicle_submitted',
+        data: { vehicleId: created.id, vehicleNumber: created.vehicleNumber },
+        saveToDb: true,
+      }).catch((err) => console.error('Error notifying partner of vehicle submission:', err));
+    }
+
+    // 2. Notify Admins
+    const ownerName = created.owner?.user?.name || 'Partner';
+    await notificationsService.sendToAdmins({
+      title: '📋 New Vehicle Added for Verification',
+      message: `${ownerName} added ${created.brand} ${created.model} (${created.vehicleNumber}). Pending approval.`,
+      type: 'admin_vehicle_verification',
+      data: { vehicleId: created.id, vehicleNumber: created.vehicleNumber },
+    }).catch((err) => console.error('Error notifying admin of new vehicle:', err));
+
+    return created;
   }
 
   async updateVehicleStatus(id: string, status: 'PENDING' | 'VERIFIED' | 'REJECTED' | 'MAINTENANCE') {
-    return prisma.vehicle.update({
+    const updated = await prisma.vehicle.update({
       where: { id },
       data: { status },
+      include: {
+        owner: { select: { userId: true } },
+      },
     });
+
+    if (updated.owner?.userId) {
+      if (status === 'VERIFIED') {
+        await notificationsService.sendToUser({
+          userId: updated.owner.userId,
+          title: '🎉 Vehicle Approved!',
+          message: `Your ${updated.brand} ${updated.model} (${updated.vehicleNumber}) has been verified and approved for fleet operations.`,
+          type: 'vehicle_approved',
+          data: { vehicleId: updated.id, vehicleNumber: updated.vehicleNumber },
+          saveToDb: true,
+        }).catch((err) => console.error('Error notifying partner of vehicle verification:', err));
+      } else if (status === 'REJECTED') {
+        await notificationsService.sendToUser({
+          userId: updated.owner.userId,
+          title: '❌ Vehicle Verification Rejected',
+          message: `Your ${updated.brand} ${updated.model} (${updated.vehicleNumber}) was rejected by admin. Please check documents.`,
+          type: 'vehicle_rejected',
+          data: { vehicleId: updated.id, vehicleNumber: updated.vehicleNumber },
+          saveToDb: true,
+        }).catch((err) => console.error('Error notifying partner of vehicle rejection:', err));
+      }
+    }
+
+    return updated;
   }
 
   async toggleVehicleAvailability(vehicleId: string, isOnline: boolean) {

@@ -220,6 +220,11 @@ export class NotificationsService {
         where: { role: 'DRIVER', isActive: true },
         select: { id: true, name: true, role: true },
       });
+    } else if (audience === 'admin') {
+      targetUsers = await prisma.user.findMany({
+        where: { role: { in: ['ADMIN', 'SUPER_ADMIN', 'ZONE_ADMIN', 'DISPATCHER'] }, isActive: true },
+        select: { id: true, name: true, role: true },
+      });
     } else {
       // 'both' or 'all'
       targetUsers = await prisma.user.findMany({
@@ -446,6 +451,29 @@ export class NotificationsService {
         id: { in: notificationIds },
         userId,
       },
+    });
+  }
+
+  /**
+   * Send notification to all admin users and persist to their notification inbox
+   */
+  async sendToAdmins({
+    title,
+    message,
+    type = 'admin_alert',
+    data,
+  }: {
+    title: string;
+    message: string;
+    type?: string;
+    data?: Record<string, string>;
+  }) {
+    return this.sendAudienceNotification({
+      audience: 'admin',
+      title,
+      message,
+      type,
+      data,
     });
   }
 }

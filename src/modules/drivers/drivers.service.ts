@@ -1,4 +1,5 @@
 import { prisma } from '../../config/prisma';
+import { notificationsService } from '../notifications/notifications.service';
 
 export class DriversService {
   async getDriverByUserId(userId: string) {
@@ -537,6 +538,28 @@ export class DriversService {
           ownerId: driverProfileId,
         },
       });
+
+      if (driver.userId) {
+        await notificationsService.sendToUser({
+          userId: driver.userId,
+          title: '✅ Profile Verified & Approved',
+          message: 'Congratulations! Your driver account has been verified. You can now go online and accept rides.',
+          type: 'driver_approved',
+          saveToDb: true,
+        }).catch((err) => console.error('Error notifying driver of approval:', err));
+      }
+    } else if (approvalStatus === 'REJECTED') {
+      if (driver.userId) {
+        await notificationsService.sendToUser({
+          userId: driver.userId,
+          title: '❌ Verification Rejected',
+          message: rejectionReason
+            ? `Your verification was rejected: ${rejectionReason}. Please update documents in Account screen.`
+            : 'Your verification was rejected. Please re-upload your documents in Account screen.',
+          type: 'driver_rejected',
+          saveToDb: true,
+        }).catch((err) => console.error('Error notifying driver of rejection:', err));
+      }
     }
 
     return driver;
@@ -583,6 +606,28 @@ export class DriversService {
       driver.assignedHubId,
       notes || null
     );
+
+    // 1. Notify Driver in App Inbox
+    if (driver.userId) {
+      await notificationsService.sendToUser({
+        userId: driver.userId,
+        title: '🚗 Vehicle Request Submitted',
+        message: 'Your vehicle request has been sent to Hub Manager. Waiting for allocation.',
+        type: 'vehicle_request',
+        data: { requestId, status: 'PENDING' },
+        saveToDb: true,
+      }).catch((err) => console.error('Error sending driver vehicle request notification:', err));
+    }
+
+    // 2. Notify Admins
+    const driverName = driver.user?.name || 'Driver';
+    const driverPhone = driver.user?.phone || '';
+    await notificationsService.sendToAdmins({
+      title: '🚗 New Vehicle Request',
+      message: `${driverName} (${driverPhone}) requested a vehicle from Hub.`,
+      type: 'admin_vehicle_request',
+      data: { driverId: driver.id, requestId },
+    }).catch((err) => console.error('Error notifying admin of vehicle request:', err));
 
     return {
       success: true,
