@@ -153,7 +153,7 @@ export class VehiclesService {
     return created;
   }
 
-  async updateVehicleStatus(id: string, status: 'PENDING' | 'VERIFIED' | 'REJECTED' | 'MAINTENANCE') {
+  async updateVehicleStatus(id: string, status: 'PENDING' | 'VERIFIED' | 'REJECTED' | 'MAINTENANCE', rejectionReason?: string) {
     const updated = await prisma.vehicle.update({
       where: { id },
       data: { status },
@@ -176,7 +176,9 @@ export class VehiclesService {
         await notificationsService.sendToUser({
           userId: updated.owner.userId,
           title: '❌ Vehicle Verification Rejected',
-          message: `Your ${updated.brand} ${updated.model} (${updated.vehicleNumber}) was rejected by admin. Please check documents.`,
+          message: rejectionReason && rejectionReason.trim().length > 0
+            ? `Your ${updated.brand} ${updated.model} (${updated.vehicleNumber}) was rejected by admin: ${rejectionReason}. Please check documents.`
+            : `Your ${updated.brand} ${updated.model} (${updated.vehicleNumber}) was rejected by admin. Please check documents.`,
           type: 'vehicle_rejected',
           data: { vehicleId: updated.id, vehicleNumber: updated.vehicleNumber },
           saveToDb: true,

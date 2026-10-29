@@ -124,14 +124,14 @@ export class VehiclesController {
 
   async updateStatus(req: FastifyRequest<any>, reply: FastifyReply) {
     const { id } = req.params as { id: string };
-    const { status } = (req.body as { status: 'PENDING' | 'VERIFIED' | 'REJECTED' | 'MAINTENANCE' }) || {};
+    const { status, rejectionReason } = (req.body as { status: 'PENDING' | 'VERIFIED' | 'REJECTED' | 'MAINTENANCE'; rejectionReason?: string }) || {};
 
     if (!status) {
       return reply.status(400).send({ success: false, message: 'status is required' });
     }
 
     try {
-      const updated = await vehiclesService.updateVehicleStatus(id, status);
+      const updated = await vehiclesService.updateVehicleStatus(id, status, rejectionReason);
       return reply.send({ success: true, message: `Vehicle status updated to ${status}`, data: updated });
     } catch (error) {
       return reply.status(500).send({ success: false, message: 'Failed to update vehicle status', error: String(error) });
