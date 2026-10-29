@@ -319,7 +319,7 @@ export class DriversService {
       data.personaType === 'VEHICLE_ONLY' ||
       driver.personaType === 'RENTAL';
 
-    return prisma.driverProfile.update({
+    const updated = await prisma.driverProfile.update({
       where: { userId },
       data: {
         ...(normalizedPersona ? { personaType: normalizedPersona } : {}),
@@ -344,6 +344,29 @@ export class DriversService {
         ownedVehicles: true,
       },
     });
+
+    // Notify driver of successful submission
+    if (userId) {
+      await notificationsService.sendToUser({
+        userId,
+        title: '📋 Documents Submitted for Verification',
+        message: 'Your documents have been submitted to Admin. We will notify you once verified.',
+        type: 'driver_documents_submitted',
+        saveToDb: true,
+      }).catch((err) => console.error('Error notifying driver of doc submission:', err));
+    }
+
+    // Notify Admins
+    const driverName = data.name || updated.user?.name || 'Driver';
+    const driverPhone = updated.user?.phone || '';
+    await notificationsService.sendToAdmins({
+      title: '📋 Driver Documents Submitted',
+      message: `${driverName} (${driverPhone}) submitted documents for KYC approval.`,
+      type: 'admin_driver_registered',
+      data: { driverId: updated.id, userId: updated.userId },
+    }).catch((err) => console.error('Error notifying admins of driver KYC:', err));
+
+    return updated;
   }
 
   async toggleShift(userId: string, shiftStatus: 'ON_SHIFT' | 'OFF_SHIFT') {

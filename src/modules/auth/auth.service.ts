@@ -1,6 +1,7 @@
 import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
 import { prisma } from '../../config/prisma';
+import { notificationsService } from '../notifications/notifications.service';
 
 export type OtpPurpose = 'LOGIN' | 'REGISTER' | 'RESET_PASSWORD';
 
@@ -334,6 +335,15 @@ export class AuthService {
           driverProfile: true,
         },
       });
+    }
+
+    if (isNewUser && role === 'DRIVER') {
+      notificationsService.sendToAdmins({
+        title: '👤 New Driver Registered',
+        message: `${user.name || 'New Driver'} (${user.phone}) registered for onboarding.`,
+        type: 'admin_driver_registered',
+        data: { driverId: user.driverProfile?.id || '', userId: user.id },
+      }).catch((err) => console.error('Error notifying admins of new driver:', err));
     }
 
     return {
