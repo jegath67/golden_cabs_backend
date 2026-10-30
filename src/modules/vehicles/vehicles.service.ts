@@ -83,16 +83,23 @@ export class VehiclesService {
     pricePerKm?: number;
     basePrice?: number;
     rcNumber?: string;
+    rcExpiry?: string;
+    rcFront?: string;
+    rcBack?: string;
     insuranceNumber?: string;
+    insuranceExpiry?: string;
+    insuranceDoc?: string;
     ownerId?: string;
     assignedHubId?: string;
     photos?: string[];
     vehiclePhoto?: string;
   }) {
-    const photoUrls = [
-      ...(data.photos || []),
-      ...(data.vehiclePhoto ? [data.vehiclePhoto] : []),
-    ].filter((p): p is string => typeof p === 'string' && p.trim().length > 0);
+    const photoUrls = Array.from(
+      new Set([
+        ...(data.photos || []),
+        ...(data.vehiclePhoto ? [data.vehiclePhoto] : []),
+      ])
+    ).filter((p): p is string => typeof p === 'string' && p.trim().length > 0);
 
     const created = await prisma.vehicle.create({
       data: {
@@ -108,7 +115,12 @@ export class VehiclesService {
         pricePerKm: data.pricePerKm || 14.0,
         basePrice: data.basePrice || 0.0,
         rcNumber: data.rcNumber,
+        rcExpiry: data.rcExpiry,
+        rcFront: data.rcFront,
+        rcBack: data.rcBack,
         insuranceNumber: data.insuranceNumber,
+        insuranceExpiry: data.insuranceExpiry,
+        insuranceDoc: data.insuranceDoc,
         ownerId: data.ownerId,
         assignedHubId: data.assignedHubId,
         ...(photoUrls.length > 0
@@ -156,7 +168,10 @@ export class VehiclesService {
   async updateVehicleStatus(id: string, status: 'PENDING' | 'VERIFIED' | 'REJECTED' | 'MAINTENANCE', rejectionReason?: string) {
     const updated = await prisma.vehicle.update({
       where: { id },
-      data: { status },
+      data: {
+        status,
+        ...(status === 'MAINTENANCE' || status === 'REJECTED' ? { isOnline: false } : {}),
+      },
       include: {
         owner: { select: { userId: true } },
       },
@@ -186,6 +201,47 @@ export class VehiclesService {
       }
     }
 
+    // Fix 1: Vehicle Deactivation ? Force assigned driver offline
+    if (status === 'MAINTENANCE' || status === 'REJECTED') {
+      const vehicleWithDriver = await prisma.vehicle.findUnique({
+        where: { id },
+        include: {
+          assignedDriver: true,
+        },
+      });
+
+      if (vehicleWithDriver?.assignedDriver) {
+        const driverProfile = vehicleWithDriver.assignedDriver;
+
+        // Check for active ride — ride continues safely, driver just can't go online again
+        const activeRide = await prisma.ride.findFirst({
+          where: {
+            driverId: driverProfile.id,
+            status: { in: ['SEARCHING', 'ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] },
+          },
+        });
+
+        // Force driver offline (OFF_SHIFT) so no new rides are dispatched to them
+        await prisma.driverProfile.update({
+          where: { id: driverProfile.id },
+          data: { isOnline: false, shiftStatus: 'OFF_SHIFT' },
+        });
+
+        // Notify driver
+        if (driverProfile.userId) {
+          await notificationsService.sendToUser({
+            userId: driverProfile.userId,
+            title: '?? Vehicle Deactivated',
+            message: activeRide
+              ? `Your vehicle (${updated.brand} ${updated.model}) has been deactivated by Admin. Safely complete your current trip (${activeRide.bookingCode}) then contact support.`
+              : `Your vehicle (${updated.brand} ${updated.model}) has been deactivated by Admin. You have been taken offline. Please contact support.`,
+            type: 'vehicle_deactivated',
+            saveToDb: true,
+          }).catch((err) => console.error('Error notifying driver of vehicle deactivation:', err));
+        }
+      }
+    }
+
     return updated;
   }
 
@@ -195,6 +251,14 @@ export class VehiclesService {
     });
     if (!vehicle) {
       throw new Error('Vehicle not found');
+    }
+
+    if (isOnline) {
+      if (vehicle.status !== 'VERIFIED') {
+        throw new Error(
+          `Vehicle (${vehicle.model} - ${vehicle.vehicleNumber}) is ${vehicle.status.toLowerCase()}. Only active, verified vehicles can be switched online.`
+        );
+      }
     }
 
     if (!isOnline) {
@@ -339,6 +403,39 @@ export class VehiclesService {
     }
 
     return updated;
+  }
+
+  async getVehiclePhotos(vehicleId: string) {
+    return prisma.vehiclePhoto.findMany({
+      where: { vehicleId },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
+
+  async addVehiclePhoto(vehicleId: string, photoUrl: string, tag: string = 'front') {
+    const vehicle = await prisma.vehicle.findUnique({ where: { id: vehicleId } });
+    if (!vehicle) {
+      throw new Error('Vehicle not found');
+    }
+
+    const photo = await prisma.vehiclePhoto.create({
+      data: {
+        vehicleId,
+        photoUrl,
+        tag,
+      },
+    });
+
+    // Update vehiclePhoto or status for admin re-verification
+    await prisma.vehicle.update({
+      where: { id: vehicleId },
+      data: {
+        status: 'PENDING',
+        ...(tag === 'front' ? { vehiclePhoto: photoUrl } : {}),
+      },
+    });
+
+    return photo;
   }
 }
 

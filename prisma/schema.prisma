@@ -612,5 +612,20 @@ model VehicleRequest {
   updatedAt         DateTime @updatedAt
 }
 
+model AdvertisingPartner {
+  id           String   @id @default(uuid())
+  name         String
+  companyName  String
+  businessType String
+  phone        String
+  email        String
+  status       String   @default("Active")
+  notes        String?
+  totalAds     Int      @default(0)
+  activeAds    Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
 
 

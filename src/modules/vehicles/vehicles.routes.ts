@@ -6,6 +6,14 @@ export async function vehiclesRoutes(app: FastifyInstance) {
   // Public or Authenticated browse
   app.get('/', vehiclesController.getAllVehicles.bind(vehiclesController));
   app.get('/:id', vehiclesController.getVehicleById.bind(vehiclesController));
+  app.get('/:id/photos', vehiclesController.getPhotos.bind(vehiclesController));
+
+  // Upload or attach photo to existing vehicle
+  app.post(
+    '/:id/photos',
+    { preHandler: [requireRoles(['DRIVER', 'ADMIN', 'DISPATCHER'])] },
+    vehiclesController.addPhoto.bind(vehiclesController)
+  );
 
   // Partner or Admin register vehicle
   app.post(

@@ -269,6 +269,17 @@ export class DriverAvailabilityService {
       });
     }
 
+    // Fix 2: Dispatch Validation — only VERIFIED vehicles receive rides
+    if (effectiveVehicle.status !== 'VERIFIED') {
+      return wrap({
+        isAvailable: false,
+        reasonCode: 'VEHICLE_INACTIVE',
+        reasonMessage: `Vehicle (${effectiveVehicle.model} - ${effectiveVehicle.vehicleNumber}) is ${effectiveVehicle.status.toLowerCase()}. Only verified vehicles can receive dispatches.`,
+        driver,
+        vehicle: effectiveVehicle,
+      });
+    }
+
     // Check Seat Capacity Requirement
     if (targetRide.seatCapacity && effectiveVehicle.seatCapacity < targetRide.seatCapacity) {
       return wrap({

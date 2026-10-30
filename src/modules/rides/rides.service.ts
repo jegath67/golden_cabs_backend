@@ -312,6 +312,16 @@ export class RidesService {
       throw new Error('Driver is not verified or approved');
     }
 
+    // Fix 3: Accept Ride Validation — check driver user isActive and vehicle status
+    const driverUser = await prisma.user.findUnique({ where: { id: driverUserId }, select: { isActive: true } });
+    if (!driverUser?.isActive) {
+      throw new Error('Your driver account has been deactivated by Admin. Please contact support.');
+    }
+
+    if (driver.assignedVehicle && driver.assignedVehicle.status !== 'VERIFIED') {
+      throw new Error(`Your assigned vehicle (${driver.assignedVehicle.model}) is currently ${driver.assignedVehicle.status.toLowerCase()} and cannot be used for rides. Please contact support.`);
+    }
+
     const ride = await prisma.ride.findFirst({
       where: {
         OR: [{ id: rideId }, { bookingCode: rideId }],

@@ -88,7 +88,12 @@ export class VehiclesController {
       pricePerKm?: number;
       basePrice?: number;
       rcNumber?: string;
+      rcExpiry?: string;
+      rcFront?: string;
+      rcBack?: string;
       insuranceNumber?: string;
+      insuranceExpiry?: string;
+      insuranceDoc?: string;
       assignedHubId?: string;
       ownerId?: string;
       photos?: string[];
@@ -179,6 +184,33 @@ export class VehiclesController {
       });
     } catch (error: any) {
       return reply.status(400).send({ success: false, message: error.message || 'Failed to update vehicle availability' });
+    }
+  }
+
+  async getPhotos(req: FastifyRequest<any>, reply: FastifyReply) {
+    try {
+      const { id } = req.params as { id: string };
+      const photos = await vehiclesService.getVehiclePhotos(id);
+      return reply.send({ success: true, data: photos });
+    } catch (error: any) {
+      return reply.status(500).send({ success: false, message: error.message || 'Failed to fetch photos' });
+    }
+  }
+
+  async addPhoto(req: FastifyRequest<any>, reply: FastifyReply) {
+    try {
+      const { id } = req.params as { id: string };
+      const body = (req.body as any) || {};
+      const { photoUrl, tag } = body;
+
+      if (!photoUrl || typeof photoUrl !== 'string') {
+        return reply.status(400).send({ success: false, message: 'photoUrl is required' });
+      }
+
+      const photo = await vehiclesService.addVehiclePhoto(id, photoUrl, tag || 'front');
+      return reply.send({ success: true, message: 'Photo uploaded successfully', data: photo });
+    } catch (error: any) {
+      return reply.status(400).send({ success: false, message: error.message || 'Failed to add photo' });
     }
   }
 }

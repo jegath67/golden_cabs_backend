@@ -1,5 +1,6 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { UserRole } from '../generated/prisma/enums';
+import { prisma } from '../config/prisma';
 
 export interface JwtPayload {
   id: string;
@@ -36,6 +37,19 @@ export const requireRoles = (roles: Array<UserRole>) => {
           message: `Forbidden: Access requires one of [${roles.join(', ')}]`,
         });
       }
+
+      // Fix 4: JWT Active Validation — verify account is still active in DB
+      // Applied only inside requireRoles to avoid overhead on public routes
+      const dbUser = await prisma.user.findUnique({
+        where: { id: user.id },
+        select: { isActive: true },
+      });
+      if (!dbUser || !dbUser.isActive) {
+        return reply.status(403).send({
+          success: false,
+          message: 'Account has been deactivated. Please contact support.',
+        });
+      }
     } catch (err) {
       return reply.status(401).send({
         success: false,
@@ -44,4 +58,3 @@ export const requireRoles = (roles: Array<UserRole>) => {
     }
   };
 };
-

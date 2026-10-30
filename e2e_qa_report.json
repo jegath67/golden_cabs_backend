@@ -1,0 +1,755 @@
+[
+  {
+    "testNumber": "1.1",
+    "testName": "Admin Deactivates Driver via API",
+    "status": "PASSED",
+    "request": {
+      "method": "PATCH",
+      "url": "/api/drivers/00fbf053-50ac-4d5e-b96c-2edbc5d15984/status",
+      "body": {
+        "status": "INACTIVE"
+      }
+    },
+    "response": {
+      "statusCode": 200,
+      "body": {
+        "success": true,
+        "message": "Driver status updated to INACTIVE",
+        "data": {
+          "id": "00fbf053-50ac-4d5e-b96c-2edbc5d15984",
+          "userId": "9429383d-17fa-426d-93b1-d7f50b0017d7",
+          "personaType": "DRIVE_ONLY",
+          "licenseNumber": "TN3120230001234",
+          "licenseExpiry": "2027-10-28",
+          "licenseFront": "http://192.168.1.11:3000/uploads/doc_1793184515565_06f389d0a967.jpg",
+          "licenseBack": "http://192.168.1.11:3000/uploads/doc_1793184515609_52024186d7ba.jpg",
+          "aadharNumber": "878464978788",
+          "aadharFront": "http://192.168.1.11:3000/uploads/doc_1793184515493_ff7f749b9e98.jpg",
+          "aadharBack": "http://192.168.1.11:3000/uploads/doc_1793184515523_c76cc699c803.jpg",
+          "panNumber": "FSGHH1234J",
+          "panImage": "http://192.168.1.11:3000/uploads/doc_1793184515653_9653e7247304.jpg",
+          "selfieImage": "http://192.168.1.11:3000/uploads/doc_1793184515397_71d8fbfa3bae.jpg",
+          "approvalStatus": "APPROVED",
+          "rejectionReason": null,
+          "isOnline": false,
+          "shiftStatus": "OFF_SHIFT",
+          "currentLatitude": 11.935,
+          "currentLongitude": 79.836,
+          "rating": 5,
+          "totalRides": 3,
+          "createdAt": "2026-10-28T10:45:56.023Z",
+          "updatedAt": "2026-10-30T12:21:20.458Z",
+          "assignedHubId": null,
+          "assignedVehicleId": "d039f3d7-29df-4c93-bae7-b2016b9fb670",
+          "user": {
+            "id": "9429383d-17fa-426d-93b1-d7f50b0017d7",
+            "phone": "8754358963",
+            "email": null,
+            "name": "Barath",
+            "passwordHash": null,
+            "role": "DRIVER",
+            "isActive": false,
+            "createdAt": "2026-10-28T10:45:56.023Z",
+            "updatedAt": "2026-10-30T12:21:20.409Z",
+            "assignedZoneId": null
+          },
+          "assignedVehicle": {
+            "id": "d039f3d7-29df-4c93-bae7-b2016b9fb670",
+            "vehicleNumber": "TN31VP3423",
+            "brand": "Maruti Suzuki",
+            "model": "Ertiga",
+            "year": 2021,
+            "vehicleType": "SEDAN",
+            "category": "BUDGET",
+            "fuelType": "DIESEL",
+            "gearType": "MANUAL",
+            "seatCapacity": 4,
+            "pricePerKm": 14,
+            "basePrice": 0,
+            "acAvailable": true,
+            "luggageCapacity": true,
+            "rcNumber": "TN31VP3423",
+            "rcExpiry": null,
+            "rcFront": "http://localhost:3000/uploads/doc_1793102896500_9770b0fc9873.jpg",
+            "rcBack": "http://localhost:3000/uploads/doc_1793102896555_457d9aedf5a1.jpg",
+            "insuranceNumber": "POL2526HDDH",
+            "insuranceExpiry": "2027-10-28",
+            "insuranceDoc": "http://localhost:3000/uploads/doc_1793102896595_8587dea8c3fa.jpg",
+            "status": "VERIFIED",
+            "isOnline": true,
+            "createdAt": "2026-10-27T12:08:16.769Z",
+            "updatedAt": "2026-10-30T12:21:20.359Z",
+            "ownerId": "9ce71db6-73a3-4787-bcf1-8b33458ae1dd",
+            "assignedHubId": null
+          }
+        }
+      }
+    },
+    "dbBefore": {
+      "id": "9429383d-17fa-426d-93b1-d7f50b0017d7",
+      "isActive": true,
+      "driverProfile": {
+        "isOnline": true,
+        "shiftStatus": "ON_SHIFT"
+      }
+    },
+    "dbAfter": {
+      "id": "9429383d-17fa-426d-93b1-d7f50b0017d7",
+      "isActive": false,
+      "driverProfile": {
+        "isOnline": false,
+        "shiftStatus": "OFF_SHIFT"
+      }
+    },
+    "notes": "Driver user isActive set to false, driverProfile set to OFF_SHIFT and offline"
+  },
+  {
+    "testNumber": "1.2",
+    "testName": "Deactivated Driver Online Switch Blocked",
+    "status": "PASSED",
+    "request": {
+      "method": "POST",
+      "url": "/api/drivers/shift",
+      "body": {
+        "shiftStatus": "ON_SHIFT",
+        "isOnline": true
+      }
+    },
+    "response": {
+      "statusCode": 403,
+      "body": {
+        "success": false,
+        "message": "Account has been deactivated. Please contact support."
+      }
+    },
+    "notes": "Blocked by JWT Active Validation with 403 Forbidden"
+  },
+  {
+    "testNumber": "1.3",
+    "testName": "Deactivated Driver Old JWT Protected Op Blocked",
+    "status": "PASSED",
+    "request": {
+      "method": "POST",
+      "url": "/api/drivers/location",
+      "body": {
+        "latitude": 11.9338,
+        "longitude": 79.8358
+      }
+    },
+    "response": {
+      "statusCode": 403,
+      "body": {
+        "success": false,
+        "message": "Account has been deactivated. Please contact support."
+      }
+    },
+    "notes": "Blocked with 403 Forbidden: Account has been deactivated"
+  },
+  {
+    "testNumber": "2.1",
+    "testName": "DRIVE_ONLY Vehicle Deactivation Forces Driver Offline",
+    "status": "PASSED",
+    "request": {
+      "method": "PATCH",
+      "url": "/api/vehicles/d039f3d7-29df-4c93-bae7-b2016b9fb670/status",
+      "body": {
+        "status": "MAINTENANCE"
+      }
+    },
+    "response": {
+      "statusCode": 200,
+      "body": {
+        "success": true,
+        "message": "Vehicle status updated to MAINTENANCE",
+        "data": {
+          "id": "d039f3d7-29df-4c93-bae7-b2016b9fb670",
+          "vehicleNumber": "TN31VP3423",
+          "brand": "Maruti Suzuki",
+          "model": "Ertiga",
+          "year": 2021,
+          "vehicleType": "SEDAN",
+          "category": "BUDGET",
+          "fuelType": "DIESEL",
+          "gearType": "MANUAL",
+          "seatCapacity": 4,
+          "pricePerKm": 14,
+          "basePrice": 0,
+          "acAvailable": true,
+          "luggageCapacity": true,
+          "rcNumber": "TN31VP3423",
+          "rcExpiry": null,
+          "rcFront": "http://localhost:3000/uploads/doc_1793102896500_9770b0fc9873.jpg",
+          "rcBack": "http://localhost:3000/uploads/doc_1793102896555_457d9aedf5a1.jpg",
+          "insuranceNumber": "POL2526HDDH",
+          "insuranceExpiry": "2027-10-28",
+          "insuranceDoc": "http://localhost:3000/uploads/doc_1793102896595_8587dea8c3fa.jpg",
+          "status": "MAINTENANCE",
+          "isOnline": false,
+          "createdAt": "2026-10-27T12:08:16.769Z",
+          "updatedAt": "2026-10-30T12:21:20.688Z",
+          "ownerId": "9ce71db6-73a3-4787-bcf1-8b33458ae1dd",
+          "assignedHubId": null,
+          "owner": {
+            "userId": "44c6a877-006f-43b4-85a0-5a4fbc2975f4"
+          }
+        }
+      }
+    },
+    "dbBefore": {
+      "status": "VERIFIED",
+      "isOnline": false,
+      "assignedDriver": {
+        "isOnline": true,
+        "shiftStatus": "ON_SHIFT"
+      }
+    },
+    "dbAfter": {
+      "status": "MAINTENANCE",
+      "isOnline": false,
+      "assignedDriver": {
+        "isOnline": false,
+        "shiftStatus": "OFF_SHIFT"
+      }
+    },
+    "notes": "Vehicle MAINTENANCE forces assigned driver to isOnline=false and shiftStatus=OFF_SHIFT"
+  },
+  {
+    "testNumber": "2.2",
+    "testName": "DRIVE_ONLY Shift Blocked With MAINTENANCE Vehicle",
+    "status": "PASSED",
+    "request": {
+      "method": "POST",
+      "url": "/api/drivers/shift",
+      "body": {
+        "shiftStatus": "ON_SHIFT",
+        "isOnline": true
+      }
+    },
+    "response": {
+      "statusCode": 400,
+      "body": {
+        "success": false,
+        "message": "Assigned vehicle (Ertiga) is maintenance and cannot be used to start a shift. Please contact support."
+      }
+    },
+    "notes": "toggleShift guard blocks shift start with inactive vehicle"
+  },
+  {
+    "testNumber": "2.3",
+    "testName": "OWN_VEHICLE Shift Blocked When Owned Vehicles Inactive",
+    "status": "PASSED",
+    "request": {
+      "method": "POST",
+      "url": "/api/drivers/shift",
+      "body": {
+        "shiftStatus": "ON_SHIFT",
+        "isOnline": true
+      }
+    },
+    "response": {
+      "statusCode": 400,
+      "body": {
+        "success": false,
+        "message": "Approved and verified personal vehicle required before starting shift and going online"
+      }
+    },
+    "notes": "OWN_VEHICLE requires at least one VERIFIED owned vehicle to start shift"
+  },
+  {
+    "testNumber": "2.4",
+    "testName": "RENTAL Vehicle Deactivation Forces Driver Offline",
+    "status": "PASSED",
+    "request": {
+      "method": "PATCH",
+      "url": "/api/vehicles/c8e9021e-8d5e-474e-aa9d-090577a8829e/status",
+      "body": {
+        "status": "MAINTENANCE"
+      }
+    },
+    "response": {
+      "statusCode": 200,
+      "body": {
+        "isOnline": false,
+        "shiftStatus": "OFF_SHIFT"
+      }
+    },
+    "notes": "Rental driver forced OFF_SHIFT when allocated rental vehicle is deactivated"
+  },
+  {
+    "testNumber": "3.1",
+    "testName": "Dispatch Rejected for Inactive Driver",
+    "status": "PASSED",
+    "request": {
+      "method": "PATCH",
+      "url": "/api/admin/rides/8256f905-d6d0-4ce7-a538-792c420c837f/assign",
+      "body": {
+        "driverId": "00fbf053-50ac-4d5e-b96c-2edbc5d15984"
+      }
+    },
+    "response": {
+      "statusCode": 409,
+      "body": {
+        "success": false,
+        "message": "Driver user account is suspended or inactive.",
+        "reasonCode": "DRIVER_INACTIVE",
+        "conflictDetails": {
+          "reasonCode": "DRIVER_INACTIVE",
+          "reasonMessage": "Driver user account is suspended or inactive."
+        }
+      }
+    },
+    "notes": "Blocked by evaluateDriverAvailability: DRIVER_INACTIVE"
+  },
+  {
+    "testNumber": "3.2",
+    "testName": "Dispatch Rejected for MAINTENANCE Vehicle",
+    "status": "PASSED",
+    "request": {
+      "method": "PATCH",
+      "url": "/api/admin/rides/8256f905-d6d0-4ce7-a538-792c420c837f/assign",
+      "body": {
+        "driverId": "00fbf053-50ac-4d5e-b96c-2edbc5d15984"
+      }
+    },
+    "response": {
+      "statusCode": 409,
+      "body": {
+        "success": false,
+        "message": "Vehicle (Ertiga - TN31VP3423) is maintenance. Only verified vehicles can receive dispatches.",
+        "reasonCode": "VEHICLE_INACTIVE",
+        "conflictDetails": {
+          "reasonCode": "VEHICLE_INACTIVE",
+          "reasonMessage": "Vehicle (Ertiga - TN31VP3423) is maintenance. Only verified vehicles can receive dispatches."
+        }
+      }
+    },
+    "notes": "Blocked by evaluateDriverAvailability: VEHICLE_INACTIVE"
+  },
+  {
+    "testNumber": "3.3",
+    "testName": "Dispatch Rejected for PENDING Vehicle",
+    "status": "PASSED",
+    "request": {
+      "method": "PATCH",
+      "url": "/api/admin/rides/8256f905-d6d0-4ce7-a538-792c420c837f/assign",
+      "body": {
+        "driverId": "00fbf053-50ac-4d5e-b96c-2edbc5d15984"
+      }
+    },
+    "response": {
+      "statusCode": 409,
+      "body": {
+        "success": false,
+        "message": "Vehicle (Ertiga - TN31VP3423) is pending. Only verified vehicles can receive dispatches.",
+        "reasonCode": "VEHICLE_INACTIVE",
+        "conflictDetails": {
+          "reasonCode": "VEHICLE_INACTIVE",
+          "reasonMessage": "Vehicle (Ertiga - TN31VP3423) is pending. Only verified vehicles can receive dispatches."
+        }
+      }
+    },
+    "notes": "Blocked by evaluateDriverAvailability: VEHICLE_INACTIVE"
+  },
+  {
+    "testNumber": "3.4",
+    "testName": "Accept Ride Rejected for Inactive Driver Account",
+    "status": "PASSED",
+    "request": {
+      "method": "POST",
+      "url": "/api/rides/8256f905-d6d0-4ce7-a538-792c420c837f/accept"
+    },
+    "response": {
+      "statusCode": 403,
+      "body": {
+        "success": false,
+        "message": "Account has been deactivated. Please contact support."
+      }
+    },
+    "notes": "Blocked with 403 Forbidden: Account has been deactivated"
+  },
+  {
+    "testNumber": "3.5",
+    "testName": "Accept Ride Rejected for Inactive Vehicle",
+    "status": "PASSED",
+    "request": {
+      "method": "POST",
+      "url": "/api/rides/8256f905-d6d0-4ce7-a538-792c420c837f/accept"
+    },
+    "response": {
+      "statusCode": 400,
+      "body": {
+        "success": false,
+        "message": "Your assigned vehicle (Ertiga) is currently maintenance and cannot be used for rides. Please contact support."
+      }
+    },
+    "notes": "acceptRide guard blocks acceptance when assigned vehicle is not VERIFIED"
+  },
+  {
+    "testNumber": "4.1",
+    "testName": "Ongoing Ride Protected During Driver Deactivation",
+    "status": "PASSED",
+    "request": {
+      "method": "PATCH",
+      "url": "/api/drivers/00fbf053-50ac-4d5e-b96c-2edbc5d15984/status",
+      "body": {
+        "status": "INACTIVE"
+      }
+    },
+    "response": {
+      "statusCode": 200,
+      "body": {
+        "success": true,
+        "message": "Driver status updated to INACTIVE",
+        "data": {
+          "id": "00fbf053-50ac-4d5e-b96c-2edbc5d15984",
+          "userId": "9429383d-17fa-426d-93b1-d7f50b0017d7",
+          "personaType": "DRIVE_ONLY",
+          "licenseNumber": "TN3120230001234",
+          "licenseExpiry": "2027-10-28",
+          "licenseFront": "http://192.168.1.11:3000/uploads/doc_1793184515565_06f389d0a967.jpg",
+          "licenseBack": "http://192.168.1.11:3000/uploads/doc_1793184515609_52024186d7ba.jpg",
+          "aadharNumber": "878464978788",
+          "aadharFront": "http://192.168.1.11:3000/uploads/doc_1793184515493_ff7f749b9e98.jpg",
+          "aadharBack": "http://192.168.1.11:3000/uploads/doc_1793184515523_c76cc699c803.jpg",
+          "panNumber": "FSGHH1234J",
+          "panImage": "http://192.168.1.11:3000/uploads/doc_1793184515653_9653e7247304.jpg",
+          "selfieImage": "http://192.168.1.11:3000/uploads/doc_1793184515397_71d8fbfa3bae.jpg",
+          "approvalStatus": "APPROVED",
+          "rejectionReason": null,
+          "isOnline": false,
+          "shiftStatus": "OFF_SHIFT",
+          "currentLatitude": 11.935,
+          "currentLongitude": 79.836,
+          "rating": 5,
+          "totalRides": 3,
+          "createdAt": "2026-10-28T10:45:56.023Z",
+          "updatedAt": "2026-10-30T12:21:21.535Z",
+          "assignedHubId": null,
+          "assignedVehicleId": "d039f3d7-29df-4c93-bae7-b2016b9fb670",
+          "user": {
+            "id": "9429383d-17fa-426d-93b1-d7f50b0017d7",
+            "phone": "8754358963",
+            "email": null,
+            "name": "Barath",
+            "passwordHash": null,
+            "role": "DRIVER",
+            "isActive": false,
+            "createdAt": "2026-10-28T10:45:56.023Z",
+            "updatedAt": "2026-10-30T12:21:21.526Z",
+            "assignedZoneId": null
+          },
+          "assignedVehicle": {
+            "id": "d039f3d7-29df-4c93-bae7-b2016b9fb670",
+            "vehicleNumber": "TN31VP3423",
+            "brand": "Maruti Suzuki",
+            "model": "Ertiga",
+            "year": 2021,
+            "vehicleType": "SEDAN",
+            "category": "BUDGET",
+            "fuelType": "DIESEL",
+            "gearType": "MANUAL",
+            "seatCapacity": 4,
+            "pricePerKm": 14,
+            "basePrice": 0,
+            "acAvailable": true,
+            "luggageCapacity": true,
+            "rcNumber": "TN31VP3423",
+            "rcExpiry": null,
+            "rcFront": "http://localhost:3000/uploads/doc_1793102896500_9770b0fc9873.jpg",
+            "rcBack": "http://localhost:3000/uploads/doc_1793102896555_457d9aedf5a1.jpg",
+            "insuranceNumber": "POL2526HDDH",
+            "insuranceExpiry": "2027-10-28",
+            "insuranceDoc": "http://localhost:3000/uploads/doc_1793102896595_8587dea8c3fa.jpg",
+            "status": "VERIFIED",
+            "isOnline": true,
+            "createdAt": "2026-10-27T12:08:16.769Z",
+            "updatedAt": "2026-10-30T12:21:21.455Z",
+            "ownerId": "9ce71db6-73a3-4787-bcf1-8b33458ae1dd",
+            "assignedHubId": null
+          }
+        }
+      }
+    },
+    "dbBefore": {
+      "rideStatus": "ONGOING",
+      "driverIsActive": true
+    },
+    "dbAfter": {
+      "rideStatus": "ONGOING",
+      "driverState": {
+        "isOnline": false,
+        "shiftStatus": "OFF_SHIFT",
+        "user": {
+          "isActive": false
+        }
+      }
+    },
+    "notes": "Ride remains ONGOING; driver taken OFF_SHIFT so no new rides can be dispatched"
+  },
+  {
+    "testNumber": "4.2",
+    "testName": "Ride Completes Safely & Driver Remains Offline",
+    "status": "PASSED",
+    "request": {
+      "method": "POST",
+      "url": "/api/rides/8256f905-d6d0-4ce7-a538-792c420c837f/complete",
+      "body": {
+        "paymentMethod": "CASH",
+        "distanceKm": 8.5
+      }
+    },
+    "response": {
+      "statusCode": 200,
+      "body": {
+        "success": true,
+        "message": "Ride completed successfully",
+        "data": {
+          "id": "8256f905-d6d0-4ce7-a538-792c420c837f",
+          "bookingCode": "GC-478361",
+          "customerId": "bc700f55-b604-4afd-a612-c0ac060b266c",
+          "driverId": "00fbf053-50ac-4d5e-b96c-2edbc5d15984",
+          "vehicleId": "d039f3d7-29df-4c93-bae7-b2016b9fb670",
+          "tripType": "ONE_WAY",
+          "status": "COMPLETED",
+          "pickupLocation": "White Town, Puducherry",
+          "pickupAddress": "Beach Road, White Town, Puducherry",
+          "pickupLat": 11.9338,
+          "pickupLng": 79.8358,
+          "dropLocation": "Auroville, Puducherry",
+          "dropAddress": "Visitor Centre, Auroville",
+          "dropLat": 11.986,
+          "dropLng": 79.81,
+          "stops": {
+            "isElite": false,
+            "category": "REGULAR",
+            "isScheduled": false,
+            "scheduledAt": null,
+            "seatCapacity": 4,
+            "customTripType": "Local One Way",
+            "additionalStops": [],
+            "requestedVehicle": "4 Seater Cab",
+            "scheduledDisplay": null
+          },
+          "distanceKm": 6.4,
+          "estimatedFare": 140,
+          "finalFare": 140,
+          "startOtp": "5722",
+          "paymentMethod": "CASH",
+          "paymentStatus": "PAID",
+          "cancelReason": null,
+          "cancelledBy": null,
+          "startedAt": "2026-10-30T12:21:21.512Z",
+          "completedAt": "2026-10-30T12:21:21.784Z",
+          "createdAt": "2026-10-30T12:21:21.309Z",
+          "updatedAt": "2026-10-30T12:21:21.788Z",
+          "customer": {
+            "id": "bc700f55-b604-4afd-a612-c0ac060b266c",
+            "phone": "8754358935",
+            "email": null,
+            "name": "jegath",
+            "passwordHash": null,
+            "role": "CUSTOMER",
+            "isActive": true,
+            "createdAt": "2026-10-12T12:39:23.071Z",
+            "updatedAt": "2026-10-12T12:39:23.071Z",
+            "assignedZoneId": null
+          },
+          "driver": {
+            "id": "00fbf053-50ac-4d5e-b96c-2edbc5d15984",
+            "userId": "9429383d-17fa-426d-93b1-d7f50b0017d7",
+            "personaType": "DRIVE_ONLY",
+            "licenseNumber": "TN3120230001234",
+            "licenseExpiry": "2027-10-28",
+            "licenseFront": "http://192.168.1.11:3000/uploads/doc_1793184515565_06f389d0a967.jpg",
+            "licenseBack": "http://192.168.1.11:3000/uploads/doc_1793184515609_52024186d7ba.jpg",
+            "aadharNumber": "878464978788",
+            "aadharFront": "http://192.168.1.11:3000/uploads/doc_1793184515493_ff7f749b9e98.jpg",
+            "aadharBack": "http://192.168.1.11:3000/uploads/doc_1793184515523_c76cc699c803.jpg",
+            "panNumber": "FSGHH1234J",
+            "panImage": "http://192.168.1.11:3000/uploads/doc_1793184515653_9653e7247304.jpg",
+            "selfieImage": "http://192.168.1.11:3000/uploads/doc_1793184515397_71d8fbfa3bae.jpg",
+            "approvalStatus": "APPROVED",
+            "rejectionReason": null,
+            "isOnline": false,
+            "shiftStatus": "OFF_SHIFT",
+            "currentLatitude": 11.935,
+            "currentLongitude": 79.836,
+            "rating": 5,
+            "totalRides": 3,
+            "createdAt": "2026-10-28T10:45:56.023Z",
+            "updatedAt": "2026-10-30T12:21:21.535Z",
+            "assignedHubId": null,
+            "assignedVehicleId": "d039f3d7-29df-4c93-bae7-b2016b9fb670",
+            "user": {
+              "id": "9429383d-17fa-426d-93b1-d7f50b0017d7",
+              "phone": "8754358963",
+              "email": null,
+              "name": "Barath",
+              "passwordHash": null,
+              "role": "DRIVER",
+              "isActive": false,
+              "createdAt": "2026-10-28T10:45:56.023Z",
+              "updatedAt": "2026-10-30T12:21:21.526Z",
+              "assignedZoneId": null
+            }
+          },
+          "fareBreakdown": {
+            "id": "04b37ff6-b722-46d6-bd00-4301c2cad93f",
+            "rideId": "8256f905-d6d0-4ce7-a538-792c420c837f",
+            "distanceKm": 6.4,
+            "pricePerKm": 14,
+            "baseFare": 50,
+            "tollCharge": 0,
+            "permitCharge": 0,
+            "driverBata": 0,
+            "discountAmount": 0,
+            "totalFare": 140
+          }
+        }
+      }
+    },
+    "dbAfter": {
+      "rideStatus": "COMPLETED",
+      "driverState": {
+        "isOnline": false,
+        "shiftStatus": "OFF_SHIFT"
+      }
+    },
+    "notes": "Ride successfully completed; deactivated driver stays offline permanently"
+  },
+  {
+    "testNumber": "5.1",
+    "testName": "Driver & Vehicle Reactivation Restores Eligibility",
+    "status": "PASSED",
+    "request": {
+      "method": "POST",
+      "url": "/api/drivers/shift",
+      "body": {
+        "shiftStatus": "ON_SHIFT",
+        "isOnline": true
+      }
+    },
+    "response": {
+      "statusCode": 200,
+      "body": {
+        "success": true,
+        "message": "Shift changed to ON_SHIFT",
+        "data": {
+          "isOnline": true,
+          "shiftStatus": "ON_SHIFT"
+        }
+      }
+    },
+    "dbAfter": {
+      "isOnline": true,
+      "shiftStatus": "ON_SHIFT",
+      "approvalStatus": "APPROVED",
+      "user": {
+        "isActive": true
+      },
+      "assignedVehicle": {
+        "status": "VERIFIED",
+        "isOnline": false
+      }
+    },
+    "notes": "Re-activation restores online and shift eligibility only when both user and vehicle are VERIFIED/ACTIVE"
+  },
+  {
+    "testNumber": "6.1",
+    "testName": "Regression: Public Fare Estimate Flow",
+    "status": "PASSED",
+    "request": {
+      "method": "POST",
+      "url": "/api/rides/estimate"
+    },
+    "response": {
+      "statusCode": 200,
+      "body": {
+        "success": true,
+        "data": {
+          "distanceKm": 6.4,
+          "pricePerKm": 14,
+          "baseFare": 50,
+          "driverBata": 0,
+          "estimatedFare": 140
+        }
+      }
+    },
+    "notes": "Estimated fare: ₹140, distance: 6.4 km"
+  },
+  {
+    "testNumber": "6.2",
+    "testName": "Regression: Live GPS Location Update Flow",
+    "status": "PASSED",
+    "request": {
+      "method": "POST",
+      "url": "/api/drivers/location",
+      "body": {
+        "latitude": 11.935,
+        "longitude": 79.836
+      }
+    },
+    "response": {
+      "statusCode": 200,
+      "body": {
+        "success": true,
+        "message": "Location updated",
+        "data": {
+          "latitude": 11.935,
+          "longitude": 79.836,
+          "currentLatitude": 11.935,
+          "currentLongitude": 79.836,
+          "updatedAt": "2026-10-30T12:21:22.415Z"
+        }
+      }
+    },
+    "notes": "GPS coordinates recorded in DriverProfile"
+  },
+  {
+    "testNumber": "6.3",
+    "testName": "Regression: System & FCM Notification Persistence",
+    "status": "PASSED",
+    "request": {
+      "method": "DB_QUERY",
+      "url": "Notification.findMany"
+    },
+    "response": {
+      "statusCode": 200,
+      "body": [
+        {
+          "id": "2170b977-c694-4fb4-a82d-d5b787c304b1",
+          "userId": "9429383d-17fa-426d-93b1-d7f50b0017d7",
+          "title": "💰 Trip Earnings Credited!",
+          "message": "₹112 has been added to your wallet for trip GC-478361.",
+          "type": "wallet_credited",
+          "data": {
+            "rideId": "8256f905-d6d0-4ce7-a538-792c420c837f"
+          },
+          "isRead": false,
+          "createdAt": "2026-10-30T12:21:21.810Z"
+        },
+        {
+          "id": "300c8936-b872-4a63-a29b-86251a2fbba5",
+          "userId": "9429383d-17fa-426d-93b1-d7f50b0017d7",
+          "title": "⚠️ Account Deactivated – Complete Current Trip",
+          "message": "Admin has deactivated your account. Please safely complete your current trip (GC-478361) and contact support.",
+          "type": "account_deactivated",
+          "data": null,
+          "isRead": false,
+          "createdAt": "2026-10-30T12:21:21.541Z"
+        },
+        {
+          "id": "ccc3dd18-9f83-48f1-9e79-ac95d333238e",
+          "userId": "9429383d-17fa-426d-93b1-d7f50b0017d7",
+          "title": "?? Vehicle Deactivated",
+          "message": "Your vehicle (Maruti Suzuki Ertiga) has been deactivated by Admin. You have been taken offline. Please contact support.",
+          "type": "vehicle_deactivated",
+          "data": null,
+          "isRead": false,
+          "createdAt": "2026-10-30T12:21:20.700Z"
+        }
+      ]
+    },
+    "notes": "Found 3 notifications stored for driver Barath"
+  }
+]

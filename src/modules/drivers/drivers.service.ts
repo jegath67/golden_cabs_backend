@@ -6,7 +6,7 @@ export class DriversService {
     const driver = await prisma.driverProfile.findUnique({
       where: { userId },
       include: {
-        user: { select: { id: true, name: true, phone: true, email: true } },
+        user: { select: { id: true, name: true, phone: true, email: true, isActive: true } },
         assignedHub: true,
         assignedVehicle: {
           include: { photos: true },
@@ -174,6 +174,34 @@ export class DriversService {
       data.description.trim()
     );
 
+    // Sync to SupportTicket for unified Admin Complaints Management
+    try {
+      const driver = await prisma.driverProfile.findUnique({
+        where: { id: driverProfileId },
+        include: { user: true },
+      });
+      if (driver?.user) {
+        const uuid = crypto.randomUUID();
+        await prisma.$executeRawUnsafe(
+          `INSERT INTO "SupportTicket" (
+            "id", "ticketCode", "userId", "userName", "userPhone", "userRole",
+            "complaintType", "category", "subject", "description", "priority", "status", "zone", "createdAt", "updatedAt"
+          ) VALUES ($1, $2, $3, $4, $5, 'DRIVER', 'Driver', $6, $7, $8, 'Medium', 'Open', 'Puducherry', NOW(), NOW())
+          ON CONFLICT ("ticketCode") DO NOTHING`,
+          uuid,
+          id,
+          driver.user.id,
+          driver.user.name || 'Partner Driver',
+          driver.user.phone || '',
+          data.category.trim(),
+          data.title.trim(),
+          data.description.trim()
+        );
+      }
+    } catch (e) {
+      console.error('Error syncing driver report to SupportTicket:', e);
+    }
+
     const created = await prisma.$queryRawUnsafe<any[]>(
       `SELECT * FROM "DriverReport" WHERE "id" = $1`,
       id
@@ -214,6 +242,7 @@ export class DriversService {
         fuelType?: string;
         gearType?: string;
         vehiclePhoto?: string;
+        photos?: string[];
       };
     }
   ) {
@@ -295,18 +324,29 @@ export class DriversService {
         assignedVehicleId = created.id;
       }
 
-      if (data.vehicle.vehiclePhoto && assignedVehicleId) {
-        const existingPhoto = await prisma.vehiclePhoto.findFirst({
-          where: { vehicleId: assignedVehicleId, photoUrl: data.vehicle.vehiclePhoto },
-        });
-        if (!existingPhoto) {
-          await prisma.vehiclePhoto.create({
-            data: {
-              vehicleId: assignedVehicleId,
-              photoUrl: data.vehicle.vehiclePhoto,
-              tag: 'front',
-            },
+      const allVehiclePhotos = Array.from(
+        new Set([
+          ...(data.vehicle.photos || []),
+          ...(data.vehicle.vehiclePhoto ? [data.vehicle.vehiclePhoto] : []),
+        ])
+      ).filter((p): p is string => typeof p === 'string' && p.trim().length > 0);
+
+      if (allVehiclePhotos.length > 0 && assignedVehicleId) {
+        for (let i = 0; i < allVehiclePhotos.length; i++) {
+          const photoUrl = allVehiclePhotos[i];
+          const tag = i === 0 ? 'front' : i === 1 ? 'rear' : i === 2 ? 'left' : 'right';
+          const existingPhoto = await prisma.vehiclePhoto.findFirst({
+            where: { vehicleId: assignedVehicleId, photoUrl },
           });
+          if (!existingPhoto) {
+            await prisma.vehiclePhoto.create({
+              data: {
+                vehicleId: assignedVehicleId,
+                photoUrl,
+                tag,
+              },
+            });
+          }
         }
       }
     }
@@ -385,9 +425,24 @@ export class DriversService {
     }
 
     if (isOnline) {
+      // 1. Guard: Check if Driver User account is Active
+      const user = await prisma.user.findUnique({ where: { id: userId } });
+      if (!user || user.isActive === false) {
+        throw new Error('Your driver account has been deactivated by Admin. Please contact support.');
+      }
+
+      // 2. Guard: Check if Driver Profile is Approved
+      if (driver.approvalStatus !== 'APPROVED') {
+        throw new Error('Your driver profile is not approved yet.');
+      }
+
+      // 3. Guard: Check persona-specific vehicle requirements & vehicle status
       if (driver.personaType === 'DRIVE_ONLY') {
         if (!driver.assignedVehicleId || !driver.assignedVehicle) {
           throw new Error('Vehicle allocation required from Hub before starting shift and going online');
+        }
+        if (driver.assignedVehicle.status !== 'VERIFIED') {
+          throw new Error(`Assigned vehicle (${driver.assignedVehicle.model}) is ${driver.assignedVehicle.status.toLowerCase()} and cannot be used to start a shift. Please contact support.`);
         }
       } else if (driver.personaType === 'OWN_VEHICLE') {
         const verifiedOwned = driver.ownedVehicles?.find((v) => v.status === 'VERIFIED');
@@ -404,6 +459,9 @@ export class DriversService {
       } else if (driver.personaType === 'RENTAL') {
         if (!driver.assignedVehicleId || !driver.assignedVehicle) {
           throw new Error('Active rental vehicle allocation required before starting shift and going online');
+        }
+        if (driver.assignedVehicle.status !== 'VERIFIED') {
+          throw new Error(`Rental vehicle (${driver.assignedVehicle.model}) is ${driver.assignedVehicle.status.toLowerCase()} and cannot be used to start a shift. Please contact support.`);
         }
       }
     }
@@ -494,7 +552,7 @@ export class DriversService {
         ...(personaFilter ? { personaType: personaFilter } : {}),
       },
       include: {
-        user: { select: { id: true, name: true, phone: true, email: true } },
+        user: { select: { id: true, name: true, phone: true, email: true, isActive: true } },
         assignedHub: true,
         assignedVehicle: {
           include: { photos: true },
@@ -586,6 +644,72 @@ export class DriversService {
     }
 
     return driver;
+  }
+
+  async updateDriverStatus(driverProfileId: string, status: 'ACTIVE' | 'INACTIVE') {
+    const driver = await prisma.driverProfile.findUnique({
+      where: { id: driverProfileId },
+      include: { user: true, assignedVehicle: true },
+    });
+    if (!driver) {
+      throw new Error('Driver profile not found');
+    }
+
+    const isActive = status === 'ACTIVE';
+
+    // 1. Update user account active state
+    if (driver.userId) {
+      await prisma.user.update({
+        where: { id: driver.userId },
+        data: { isActive },
+      });
+    }
+
+    // 2. If deactivated, handle active ride protection & force driver offline
+    let updatedProfile = driver;
+    if (!isActive) {
+      // Fix 6: Check for ongoing active ride before deactivation
+      const activeRide = await prisma.ride.findFirst({
+        where: {
+          driverId: driverProfileId,
+          status: { in: ['SEARCHING', 'ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] },
+        },
+      });
+
+      // Put driver OFF_SHIFT and offline so no NEW rides can be dispatched
+      // Active ongoing ride is NOT cancelled; driver can complete the trip safely.
+      updatedProfile = await prisma.driverProfile.update({
+        where: { id: driverProfileId },
+        data: {
+          isOnline: false,
+          shiftStatus: 'OFF_SHIFT',
+        },
+        include: { user: true, assignedVehicle: true },
+      });
+
+      // Also set assigned vehicle offline if any
+      if (driver.assignedVehicleId) {
+        await prisma.vehicle.update({
+          where: { id: driver.assignedVehicleId },
+          data: { isOnline: false },
+        }).catch(() => {});
+      }
+
+      // Notify driver with active ride context
+      if (driver.userId) {
+        await notificationsService.sendToUser({
+          userId: driver.userId,
+          title: activeRide ? '⚠️ Account Deactivated – Complete Current Trip' : '🚫 Account Deactivated',
+          message: activeRide
+            ? `Admin has deactivated your account. Please safely complete your current trip (${activeRide.bookingCode}) and contact support.`
+            : 'Your driver account has been deactivated by Admin. Please contact support.',
+          type: 'account_deactivated',
+          saveToDb: true,
+        }).catch((err) => console.error('Error notifying driver of deactivation:', err));
+      }
+    }
+
+    return updatedProfile;
   }
 
   async requestVehicle(userId: string, notes?: string) {

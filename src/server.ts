@@ -21,6 +21,8 @@ import { zonesRoutes } from './modules/zones/zones.routes';
 import { exploreRoutes } from './modules/explore/explore.routes';
 import { eliteCarsRoutes } from './modules/elite-cars/elite-cars.routes';
 import { bannersRoutes } from './modules/banners/banners.routes';
+import { advertisingPartnersRoutes } from './modules/advertising-partners/advertising-partners.routes';
+import { supportRoutes } from './modules/support/support.routes';
 
 const uploadsDir = path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadsDir)) {
@@ -145,6 +147,8 @@ app.register(zonesRoutes, { prefix: '/api/zones' });
 app.register(exploreRoutes, { prefix: '/api/explore' });
 app.register(eliteCarsRoutes, { prefix: '/api/elite-cars' });
 app.register(bannersRoutes, { prefix: '/api/banners' });
+app.register(advertisingPartnersRoutes, { prefix: '/api/advertising-partners' });
+app.register(supportRoutes, { prefix: '/api/support' });
 
 const start = async () => {
   try {

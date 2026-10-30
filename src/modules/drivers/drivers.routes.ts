@@ -76,4 +76,10 @@ export async function driversRoutes(app: FastifyInstance) {
     { preHandler: [requireRoles(['ADMIN', 'DISPATCHER'])] },
     driversController.verifyDriver.bind(driversController)
   );
+
+  app.patch(
+    '/:id/status',
+    { preHandler: [requireRoles(['ADMIN', 'DISPATCHER'])] },
+    driversController.updateStatus.bind(driversController)
+  );
 }

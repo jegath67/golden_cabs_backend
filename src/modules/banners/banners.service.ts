@@ -86,6 +86,75 @@ export class BannersService {
     });
   }
 
+  async getCampaignHistory() {
+    // 1. Fetch real Promo Banners
+    const banners = await prisma.promoBanner.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+
+    const bannerItems = banners.map((b) => {
+      const isOffer =
+        (b.campaignType || '').toLowerCase().includes('offer') ||
+        (b.campaignType || '').toLowerCase().includes('deal');
+      return {
+        id: b.id,
+        type: isOffer ? 'offer' : 'banner',
+        title: b.title,
+        description: b.description || '',
+        audience: b.target || 'User App',
+        channel: isOffer ? 'Offer & Deal' : 'Promo Banner',
+        time: b.createdAt.toISOString(),
+        status: b.status || 'Active',
+      };
+    });
+
+    // 2. Fetch real Notifications sent to users
+    const notifications = await prisma.notification.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+      include: {
+        user: {
+          select: { role: true },
+        },
+      },
+    });
+
+    // De-duplicate notifications by title and message so broadcast sends appear as one campaign entry
+    const seenNotif = new Set<string>();
+    const notifItems: any[] = [];
+    for (const n of notifications) {
+      const key = `${n.title}|${n.message}`;
+      if (seenNotif.has(key)) continue;
+      seenNotif.add(key);
+
+      let audienceLabel = 'Both';
+      if (n.user?.role === 'CUSTOMER') {
+        audienceLabel = 'User App';
+      } else if (n.user?.role === 'DRIVER') {
+        audienceLabel = 'Driver App';
+      }
+
+      notifItems.push({
+        id: n.id,
+        type: 'notif',
+        title: n.title,
+        description: n.message,
+        audience: audienceLabel,
+        channel: 'Push Notification',
+        time: n.createdAt.toISOString(),
+        status: 'Delivered',
+      });
+    }
+
+    // 3. Combine and sort by time descending
+    const combined = [...bannerItems, ...notifItems].sort((a, b) => {
+      return new Date(b.time).getTime() - new Date(a.time).getTime();
+    });
+
+    return combined;
+  }
+
   private async seedDefaultBanners() {
     const defaultBanners = [
       {

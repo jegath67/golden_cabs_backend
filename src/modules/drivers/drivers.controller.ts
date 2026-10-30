@@ -167,6 +167,23 @@ export class DriversController {
       return reply.status(400).send({ success: false, message: error.message || 'Failed to verify driver' });
     }
   }
+
+  async updateStatus(req: FastifyRequest<any>, reply: FastifyReply) {
+    const { id } = req.params as { id: string };
+    const { status } = (req.body as { status?: string }) || {};
+
+    if (!status) {
+      return reply.status(400).send({ success: false, message: 'status is required' });
+    }
+
+    try {
+      const normalized = status.toUpperCase() === 'ACTIVE' ? 'ACTIVE' : 'INACTIVE';
+      const updated = await driversService.updateDriverStatus(id, normalized);
+      return reply.send({ success: true, message: `Driver status updated to ${normalized}`, data: updated });
+    } catch (error: any) {
+      return reply.status(500).send({ success: false, message: error.message || 'Failed to update driver status' });
+    }
+  }
   async requestVehicle(req: FastifyRequest<any>, reply: FastifyReply) {
     try {
       const user = req.user as { id: string };

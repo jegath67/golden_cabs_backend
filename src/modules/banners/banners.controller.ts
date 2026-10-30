@@ -21,6 +21,21 @@ export class BannersController {
     }
   }
 
+  async getCampaignHistory(req: FastifyRequest<any>, reply: FastifyReply) {
+    try {
+      const history = await bannersService.getCampaignHistory();
+      return reply.send({
+        success: true,
+        data: history,
+      });
+    } catch (error: any) {
+      return reply.status(500).send({
+        success: false,
+        message: error.message || 'Failed to fetch campaign history',
+      });
+    }
+  }
+
   async getBannerById(req: FastifyRequest<any>, reply: FastifyReply) {
     try {
       const { id } = req.params as { id: string };
