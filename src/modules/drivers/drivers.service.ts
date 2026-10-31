@@ -768,6 +768,13 @@ export class DriversService {
       };
     }
 
+    // Unavailability Guard: Cannot request vehicle if driver is marked unavailable today
+    const todayStr = unavailabilityService.normalizeDate(new Date());
+    const isTodayBlocked = await unavailabilityService.isUnavailable(driver.id, null, todayStr);
+    if (isTodayBlocked) {
+      throw new Error(`Cannot request a vehicle: You are scheduled unavailable today (${todayStr}). Please clear your unavailability schedule first.`);
+    }
+
     const pending = await prisma.$queryRawUnsafe<any[]>(
       `SELECT * FROM "VehicleRequest" WHERE "driverProfileId" = $1 AND "status" = 'PENDING' LIMIT 1`,
       driver.id
@@ -819,6 +826,56 @@ export class DriversService {
       pending: true,
       message: 'Vehicle request submitted to Hub. Waiting for allocation.',
       requestId,
+    };
+  }
+
+  async cancelVehicleRequest(requestId: string, adminReason?: string) {
+    const rawId = String(requestId).trim();
+    const reqs = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT vr.*, dp."userId"
+       FROM "VehicleRequest" vr
+       JOIN "DriverProfile" dp ON vr."driverProfileId" = dp."id"
+       WHERE vr."id" = $1 LIMIT 1`,
+      rawId
+    ).catch(() => []);
+
+    if (!reqs || reqs.length === 0) {
+      throw new Error('Vehicle request not found');
+    }
+
+    const targetReq = reqs[0];
+    if (targetReq.status === 'CANCELLED') {
+      return { success: true, message: 'Vehicle request is already cancelled', requestId: rawId };
+    }
+
+    const reason = adminReason?.trim() || 'Cancelled by Admin';
+
+    await prisma.$executeRawUnsafe(
+      `UPDATE "VehicleRequest" 
+       SET "status" = 'CANCELLED', "adminNotes" = $1, "updatedAt" = NOW() 
+       WHERE "id" = $2`,
+      reason,
+      rawId
+    );
+
+    // Notify Driver in App Inbox
+    if (targetReq.userId) {
+      await notificationsService.sendToUser({
+        userId: targetReq.userId,
+        title: 'Vehicle Request Cancelled',
+        message: adminReason?.trim() 
+          ? `Your vehicle request was cancelled: ${adminReason.trim()}`
+          : 'Your vehicle request has been cancelled by Admin. You may submit a new request if needed.',
+        type: 'vehicle_request_cancelled',
+        data: { requestId: rawId, status: 'CANCELLED' },
+        saveToDb: true,
+      }).catch((err) => console.error('Error sending driver cancellation notification:', err));
+    }
+
+    return {
+      success: true,
+      message: 'Vehicle request cancelled successfully',
+      requestId: rawId,
     };
   }
 

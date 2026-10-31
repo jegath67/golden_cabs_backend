@@ -72,6 +72,12 @@ export async function driversRoutes(app: FastifyInstance) {
   );
 
   app.patch(
+    '/vehicle-requests/:id/cancel',
+    { preHandler: [requireRoles(['ADMIN', 'DISPATCHER'])] },
+    driversController.cancelVehicleRequest.bind(driversController)
+  );
+
+  app.patch(
     '/:id/verify',
     { preHandler: [requireRoles(['ADMIN', 'DISPATCHER'])] },
     driversController.verifyDriver.bind(driversController)

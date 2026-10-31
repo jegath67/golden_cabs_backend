@@ -195,6 +195,17 @@ export class DriversController {
     }
   }
 
+  async cancelVehicleRequest(req: FastifyRequest<any>, reply: FastifyReply) {
+    try {
+      const { id } = req.params as { id: string };
+      const body = (req.body as { reason?: string }) || {};
+      const result = await driversService.cancelVehicleRequest(id, body.reason);
+      return reply.send(result);
+    } catch (error: any) {
+      return reply.status(400).send({ success: false, message: error.message || 'Failed to cancel vehicle request' });
+    }
+  }
+
   async getVehicleRequests(req: FastifyRequest<any>, reply: FastifyReply) {
     try {
       const { status } = (req.query as { status?: string }) || {};
