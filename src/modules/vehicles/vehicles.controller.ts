@@ -1,6 +1,7 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { vehiclesService } from './vehicles.service';
 import { prisma } from '../../config/prisma';
+import { schedulerService } from '../scheduler/scheduler.service';
 
 export class VehiclesController {
   async getAllVehicles(req: FastifyRequest<any>, reply: FastifyReply) {
@@ -211,6 +212,29 @@ export class VehiclesController {
       return reply.send({ success: true, message: 'Photo uploaded successfully', data: photo });
     } catch (error: any) {
       return reply.status(400).send({ success: false, message: error.message || 'Failed to add photo' });
+    }
+  }
+
+  async resetDailyAllocations(req: FastifyRequest<any>, reply: FastifyReply) {
+    try {
+      const { force } = (req.body as { force?: boolean }) || {};
+      const result = await schedulerService.triggerManualReset({ force });
+      return reply.send({
+        success: true,
+        message: `Successfully executed daily allocation reset. Reset: ${result.resetCount}, Skipped: ${result.skippedCount}`,
+        data: result,
+      });
+    } catch (error: any) {
+      return reply.status(500).send({ success: false, message: error.message || 'Failed to reset daily allocations' });
+    }
+  }
+
+  async getDailyAllocationStatus(req: FastifyRequest<any>, reply: FastifyReply) {
+    try {
+      const status = schedulerService.getStatus();
+      return reply.send({ success: true, data: status });
+    } catch (error: any) {
+      return reply.status(500).send({ success: false, message: error.message || 'Failed to get scheduler status' });
     }
   }
 }

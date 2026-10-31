@@ -41,4 +41,17 @@ export async function vehiclesRoutes(app: FastifyInstance) {
     { preHandler: [requireRoles(['DRIVER', 'ADMIN', 'DISPATCHER'])] },
     vehiclesController.toggleAvailability.bind(vehiclesController)
   );
+
+  // Daily vehicle allocation reset (Admin trigger & status)
+  app.post(
+    '/reset-daily-allocations',
+    { preHandler: [requireRoles(['ADMIN', 'SUPER_ADMIN', 'DISPATCHER'])] },
+    vehiclesController.resetDailyAllocations.bind(vehiclesController)
+  );
+
+  app.get(
+    '/daily-allocation-status',
+    { preHandler: [requireRoles(['ADMIN', 'SUPER_ADMIN', 'DISPATCHER'])] },
+    vehiclesController.getDailyAllocationStatus.bind(vehiclesController)
+  );
 }

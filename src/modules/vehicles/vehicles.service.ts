@@ -145,7 +145,7 @@ export class VehiclesService {
     if (created.owner?.userId) {
       await notificationsService.sendToUser({
         userId: created.owner.userId,
-        title: '🚙 Vehicle Submitted for Approval',
+        title: '🚕 Vehicle Submitted for Approval',
         message: `${created.brand} ${created.model} (${created.vehicleNumber}) has been submitted for admin verification.`,
         type: 'vehicle_submitted',
         data: { vehicleId: created.id, vehicleNumber: created.vehicleNumber },
@@ -201,7 +201,7 @@ export class VehiclesService {
       }
     }
 
-    // Fix 1: Vehicle Deactivation ? Force assigned driver offline
+    // Vehicle Deactivation -> Force assigned driver offline
     if (status === 'MAINTENANCE' || status === 'REJECTED') {
       const vehicleWithDriver = await prisma.vehicle.findUnique({
         where: { id },
@@ -213,7 +213,7 @@ export class VehiclesService {
       if (vehicleWithDriver?.assignedDriver) {
         const driverProfile = vehicleWithDriver.assignedDriver;
 
-        // Check for active ride � ride continues safely, driver just can't go online again
+        // Check for active ride — ride continues safely, driver just can't go online again
         const activeRide = await prisma.ride.findFirst({
           where: {
             driverId: driverProfile.id,
@@ -231,7 +231,7 @@ export class VehiclesService {
         if (driverProfile.userId) {
           await notificationsService.sendToUser({
             userId: driverProfile.userId,
-            title: '?? Vehicle Deactivated',
+            title: '⚠️ Vehicle Deactivated',
             message: activeRide
               ? `Your vehicle (${updated.brand} ${updated.model}) has been deactivated by Admin. Safely complete your current trip (${activeRide.bookingCode}) then contact support.`
               : `Your vehicle (${updated.brand} ${updated.model}) has been deactivated by Admin. You have been taken offline. Please contact support.`,
@@ -403,6 +403,131 @@ export class VehiclesService {
     }
 
     return updated;
+  }
+
+  /**
+   * Auto-unassign company-allocated vehicles for DRIVE_ONLY drivers at end-of-day / midnight.
+   * Safety rules:
+   * 1. Only targets DRIVE_ONLY persona drivers (never unassigns OWN_VEHICLE drivers who own their cars).
+   * 2. Only targets vehicles not owned by the driver (company fleet / hub pool).
+   * 3. Skips any driver who is currently on an active trip (SEARCHING, ACCEPTED, EN_ROUTE, ARRIVED, ONGOING).
+   */
+  async resetDailyDriveOnlyAllocations(options?: { force?: boolean }) {
+    console.log('[Scheduler] Running daily vehicle allocation reset...');
+
+    // 1. Find all DRIVE_ONLY drivers who currently have a vehicle assigned
+    const drivers = await prisma.driverProfile.findMany({
+      where: {
+        personaType: 'DRIVE_ONLY',
+        assignedVehicleId: { not: null },
+      },
+      include: {
+        user: { select: { id: true, name: true, phone: true } },
+        assignedVehicle: true,
+      },
+    });
+
+    let resetCount = 0;
+    let skippedCount = 0;
+    const details: any[] = [];
+
+    for (const driver of drivers) {
+      if (!driver.assignedVehicle) continue;
+
+      const vehicle = driver.assignedVehicle;
+
+      // Double-safety check: Ensure vehicle is NOT owned by this driver
+      if (vehicle.ownerId && vehicle.ownerId === driver.id) {
+        continue;
+      }
+
+      // Check if driver has an active ongoing trip
+      const activeRide = await prisma.ride.findFirst({
+        where: {
+          driverId: driver.id,
+          status: { in: ['SEARCHING', 'ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] },
+        },
+      });
+
+      if (activeRide && !options?.force) {
+        console.log(
+          `[Scheduler] Skipping daily vehicle reset for driver ${driver.user?.name || driver.id}: active trip ${activeRide.bookingCode || activeRide.id} in progress`
+        );
+        skippedCount++;
+        details.push({
+          driverId: driver.id,
+          driverName: driver.user?.name,
+          vehicleId: vehicle.id,
+          status: 'SKIPPED_ACTIVE_RIDE',
+          activeRideId: activeRide.bookingCode || activeRide.id,
+        });
+        continue;
+      }
+
+      try {
+        // Disconnect vehicle and set driver OFF_SHIFT & offline
+        await prisma.$transaction([
+          prisma.driverProfile.update({
+            where: { id: driver.id },
+            data: {
+              assignedVehicleId: null,
+              isOnline: false,
+              shiftStatus: 'OFF_SHIFT',
+            },
+          }),
+          prisma.vehicle.update({
+            where: { id: vehicle.id },
+            data: {
+              isOnline: false,
+              assignedDriver: {
+                disconnect: true,
+              },
+            },
+          }),
+        ]);
+
+        resetCount++;
+        details.push({
+          driverId: driver.id,
+          driverName: driver.user?.name,
+          vehicleId: vehicle.id,
+          vehicleNumber: vehicle.vehicleNumber,
+          status: 'RESET_SUCCESS',
+        });
+
+        // Send notification to the driver
+        if (driver.userId) {
+          notificationsService
+            .sendToUser({
+              userId: driver.userId,
+              title: '🌙 Daily Shift Reset',
+              message: `Your daily allocation for ${vehicle.brand} ${vehicle.model} (${vehicle.vehicleNumber}) has ended. Please request a new vehicle from the Hub when you start tomorrow.`,
+              type: 'vehicle_unassignment',
+              data: {
+                vehicleId: vehicle.id,
+                vehicleNumber: vehicle.vehicleNumber,
+                reason: 'daily_shift_reset',
+              },
+              saveToDb: true,
+            })
+            .catch((err) => console.error('Error notifying driver of daily vehicle reset:', err));
+        }
+      } catch (err) {
+        console.error(`[Scheduler] Error resetting vehicle allocation for driver ${driver.id}:`, err);
+      }
+    }
+
+    console.log(
+      `[Scheduler] Daily vehicle allocation reset complete. Reset: ${resetCount}, Skipped: ${skippedCount}`
+    );
+
+    return {
+      success: true,
+      timestamp: new Date().toISOString(),
+      resetCount,
+      skippedCount,
+      details,
+    };
   }
 
   async getVehiclePhotos(vehicleId: string) {

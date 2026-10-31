@@ -24,6 +24,7 @@ import { bannersRoutes } from './modules/banners/banners.routes';
 import { advertisingPartnersRoutes } from './modules/advertising-partners/advertising-partners.routes';
 import { supportRoutes } from './modules/support/support.routes';
 import { unavailabilityRoutes } from './modules/unavailability/unavailability.routes';
+import { schedulerService } from './modules/scheduler/scheduler.service';
 
 const uploadsDir = path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadsDir)) {
@@ -161,6 +162,9 @@ const start = async () => {
       port: 3000,
       host: '0.0.0.0',
     });
+
+    // Initialize background daily scheduler (midnight vehicle reset, etc.)
+    schedulerService.init();
 
     console.log('🚀 Golden Cabs Backend running on http://localhost:3000');
   } catch (error) {
