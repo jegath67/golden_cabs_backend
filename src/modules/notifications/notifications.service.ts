@@ -403,9 +403,46 @@ export class NotificationsService {
       prisma.notification.count({ where: { userId, isRead: false } }),
     ]);
 
+    // Synchronize live status for vehicle requests
+    const requestIds = items
+      .map((item) => {
+        const d: any = item.data;
+        return d?.requestId || d?.request_id;
+      })
+      .filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
+
+    const vrStatusMap = new Map<string, string>();
+    if (requestIds.length > 0) {
+      try {
+        const vrs = await prisma.$queryRawUnsafe<any[]>(
+          `SELECT id, status FROM "VehicleRequest" WHERE id = ANY($1::text[])`,
+          requestIds
+        );
+        for (const vr of vrs) {
+          vrStatusMap.set(vr.id, vr.status);
+        }
+      } catch (_) {}
+    }
+
+    const enrichedItems = items.map((item) => {
+      const d: any = item.data || {};
+      const reqId = d?.requestId || d?.request_id;
+      if (reqId && vrStatusMap.has(reqId)) {
+        const liveStatus = vrStatusMap.get(reqId);
+        return {
+          ...item,
+          data: {
+            ...d,
+            status: liveStatus,
+          },
+        };
+      }
+      return item;
+    });
+
     return {
-      items,
-      notifications: items,
+      items: enrichedItems,
+      notifications: enrichedItems,
       total,
       unreadCount,
       page,

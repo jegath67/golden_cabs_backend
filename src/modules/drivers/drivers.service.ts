@@ -909,10 +909,16 @@ export class DriversService {
       targetRequestId
     );
 
-    // Also mark any admin notification for this request as read
+    // Also mark any admin notification for this request as read and set status to CANCELLED in data JSON
     await prisma.$executeRawUnsafe(
-      `UPDATE "Notification" SET "isRead" = true WHERE "data"->>'requestId' = $1`,
-      targetRequestId
+      `UPDATE "Notification" 
+       SET "isRead" = true,
+           "data" = jsonb_set(COALESCE("data"::jsonb, '{}'::jsonb), '{status}', '"CANCELLED"')
+       WHERE "data"->>'requestId' = $1 
+          OR "data"->>'request_id' = $1 
+          OR "id" = $2`,
+      targetRequestId,
+      rawId
     ).catch(() => {});
 
     // Notify Driver in App Inbox
