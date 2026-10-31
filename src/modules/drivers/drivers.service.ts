@@ -54,9 +54,12 @@ export class DriversService {
       };
     };
 
+    const unavailableDates = await unavailabilityService.getSchedule(driver.id, driver.assignedVehicleId);
+
     return {
       ...driver,
       driverCode,
+      unavailableDates,
       isVehicleRequestPending,
       pendingVehicleRequest,
       assignedVehicle: attachVehiclePhotos(driver.assignedVehicle),
@@ -588,12 +591,35 @@ export class DriversService {
       };
     };
 
+    // Pre-fetch all unavailability records in one quick query
+    const unavailMap: Record<string, string[]> = {};
+    try {
+      const allSchedules = await prisma.$queryRawUnsafe<any[]>(
+        `SELECT "driverId", "vehicleId", "date" FROM "UnavailabilitySchedule" ORDER BY "date" ASC`
+      );
+      for (const row of allSchedules) {
+        if (row.driverId) {
+          if (!unavailMap[row.driverId]) unavailMap[row.driverId] = [];
+          if (!unavailMap[row.driverId].includes(row.date)) unavailMap[row.driverId].push(row.date);
+        }
+        if (row.vehicleId) {
+          if (!unavailMap[row.vehicleId]) unavailMap[row.vehicleId] = [];
+          if (!unavailMap[row.vehicleId].includes(row.date)) unavailMap[row.vehicleId].push(row.date);
+        }
+      }
+    } catch (_) {}
+
     return list.map((d) => {
       const clean = d.id.replace(/-/g, '').toUpperCase();
       const suffix = clean.length >= 5 ? clean.substring(0, 5) : clean.padStart(4, '0');
+      const driverDates = unavailMap[d.id] || [];
+      const vehicleDates = d.assignedVehicleId ? (unavailMap[d.assignedVehicleId] || []) : [];
+      const unavailableDates = Array.from(new Set([...driverDates, ...vehicleDates])).sort();
+
       return {
         ...d,
         driverCode: `DRV-${suffix}`,
+        unavailableDates,
         assignedVehicle: attachVehiclePhotos(d.assignedVehicle),
         ownedVehicles: Array.isArray(d.ownedVehicles)
           ? d.ownedVehicles.map(attachVehiclePhotos)
