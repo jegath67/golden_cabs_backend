@@ -565,3 +565,4 @@ export class VehiclesService {
 }
 
 export const vehiclesService = new VehiclesService();
+
