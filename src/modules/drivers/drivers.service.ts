@@ -829,9 +829,11 @@ export class DriversService {
     };
   }
 
-  async cancelVehicleRequest(requestId: string, adminReason?: string) {
+  async cancelVehicleRequest(requestId: string, adminReason?: string, driverId?: string) {
     const rawId = String(requestId).trim();
-    const reqs = await prisma.$queryRawUnsafe<any[]>(
+
+    // 1. Try finding by VehicleRequest id
+    let reqs = await prisma.$queryRawUnsafe<any[]>(
       `SELECT vr.*, dp."userId"
        FROM "VehicleRequest" vr
        JOIN "DriverProfile" dp ON vr."driverProfileId" = dp."id"
@@ -839,13 +841,62 @@ export class DriversService {
       rawId
     ).catch(() => []);
 
+    // 2. If not found by VehicleRequest id, check if rawId is a Notification id
     if (!reqs || reqs.length === 0) {
-      throw new Error('Vehicle request not found');
+      const notif = await prisma.notification.findUnique({ where: { id: rawId } }).catch(() => null);
+      if (notif && notif.data) {
+        let nData: any = notif.data;
+        if (typeof nData === 'string') {
+          try { nData = JSON.parse(nData); } catch (_) {}
+        }
+        const extractedReqId = nData?.requestId || nData?.request_id;
+        const extractedDriverId = nData?.driverId || nData?.driver_id;
+
+        if (extractedReqId) {
+          reqs = await prisma.$queryRawUnsafe<any[]>(
+            `SELECT vr.*, dp."userId"
+             FROM "VehicleRequest" vr
+             JOIN "DriverProfile" dp ON vr."driverProfileId" = dp."id"
+             WHERE vr."id" = $1 LIMIT 1`,
+            extractedReqId
+          ).catch(() => []);
+        }
+
+        if ((!reqs || reqs.length === 0) && extractedDriverId) {
+          reqs = await prisma.$queryRawUnsafe<any[]>(
+            `SELECT vr.*, dp."userId"
+             FROM "VehicleRequest" vr
+             JOIN "DriverProfile" dp ON vr."driverProfileId" = dp."id"
+             WHERE vr."driverProfileId" = $1 AND vr."status" = 'PENDING'
+             ORDER BY vr."createdAt" DESC LIMIT 1`,
+            extractedDriverId
+          ).catch(() => []);
+        }
+      }
+    }
+
+    // 3. If still not found, check if rawId or driverId matches a driver's pending request
+    const effectiveDriverId = driverId || rawId;
+    if (!reqs || reqs.length === 0) {
+      reqs = await prisma.$queryRawUnsafe<any[]>(
+        `SELECT vr.*, dp."userId"
+         FROM "VehicleRequest" vr
+         JOIN "DriverProfile" dp ON vr."driverProfileId" = dp."id"
+         WHERE vr."driverProfileId" = $1 AND vr."status" = 'PENDING'
+         ORDER BY vr."createdAt" DESC LIMIT 1`,
+        effectiveDriverId
+      ).catch(() => []);
+    }
+
+    if (!reqs || reqs.length === 0) {
+      throw new Error(`Vehicle request not found for ID: ${rawId}`);
     }
 
     const targetReq = reqs[0];
+    const targetRequestId = targetReq.id;
+
     if (targetReq.status === 'CANCELLED') {
-      return { success: true, message: 'Vehicle request is already cancelled', requestId: rawId };
+      return { success: true, message: 'Vehicle request is already cancelled', requestId: targetRequestId };
     }
 
     const reason = adminReason?.trim() || 'Cancelled by Admin';
@@ -855,8 +906,14 @@ export class DriversService {
        SET "status" = 'CANCELLED', "adminNotes" = $1, "updatedAt" = NOW() 
        WHERE "id" = $2`,
       reason,
-      rawId
+      targetRequestId
     );
+
+    // Also mark any admin notification for this request as read
+    await prisma.$executeRawUnsafe(
+      `UPDATE "Notification" SET "isRead" = true WHERE "data"->>'requestId' = $1`,
+      targetRequestId
+    ).catch(() => {});
 
     // Notify Driver in App Inbox
     if (targetReq.userId) {
@@ -867,7 +924,7 @@ export class DriversService {
           ? `Your vehicle request was cancelled: ${adminReason.trim()}`
           : 'Your vehicle request has been cancelled by Admin. You may submit a new request if needed.',
         type: 'vehicle_request_cancelled',
-        data: { requestId: rawId, status: 'CANCELLED' },
+        data: { requestId: targetRequestId, status: 'CANCELLED' },
         saveToDb: true,
       }).catch((err) => console.error('Error sending driver cancellation notification:', err));
     }
@@ -875,7 +932,7 @@ export class DriversService {
     return {
       success: true,
       message: 'Vehicle request cancelled successfully',
-      requestId: rawId,
+      requestId: targetRequestId,
     };
   }
 
