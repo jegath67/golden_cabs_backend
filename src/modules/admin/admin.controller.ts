@@ -366,10 +366,20 @@ export class AdminController {
    */
   async getRides(req: FastifyRequest, reply: FastifyReply) {
     try {
-      const { status, limit } = (req.query as any) || {};
+      const { status, limit, customerId } = (req.query as any) || {};
       const where: any = {};
       if (status) {
         where.status = status;
+      }
+      if (customerId) {
+        const cleanCustId = String(customerId).trim();
+        const isCustCode = cleanCustId.toUpperCase().startsWith('CUST-');
+        if (isCustCode) {
+          const suffix = cleanCustId.substring(5).replace(/-/g, '').toLowerCase();
+          where.customer = { id: { endsWith: suffix } };
+        } else {
+          where.customerId = cleanCustId;
+        }
       }
 
       const rides = await prisma.ride.findMany({
@@ -401,6 +411,63 @@ export class AdminController {
       return reply.status(500).send({
         success: false,
         message: 'Failed to retrieve ride requests',
+        error: String(error),
+      });
+    }
+  }
+
+  /**
+   * Get all rides for a specific customer
+   */
+  async getCustomerRides(req: FastifyRequest<any>, reply: FastifyReply) {
+    try {
+      const { id } = req.params as { id: string };
+      const cleanId = String(id).trim();
+      const isCustCode = cleanId.toUpperCase().startsWith('CUST-');
+      const suffix = isCustCode ? cleanId.substring(5).replace(/-/g, '').toLowerCase() : null;
+
+      let targetUserId = cleanId;
+      if (isCustCode && suffix) {
+        const user = await prisma.user.findFirst({
+          where: {
+            role: 'CUSTOMER',
+            id: { endsWith: suffix },
+          },
+          select: { id: true },
+        });
+        if (user) {
+          targetUserId = user.id;
+        }
+      }
+
+      const rides = await prisma.ride.findMany({
+        where: { customerId: targetUserId },
+        orderBy: { createdAt: 'desc' },
+        include: {
+          customer: { select: { id: true, name: true, phone: true } },
+          driver: {
+            include: {
+              user: { select: { name: true, phone: true } },
+              assignedVehicle: true,
+            },
+          },
+          vehicle: true,
+          fareBreakdown: true,
+        },
+      });
+
+      const formatted = rides.map((r) => formatRideResponse(r));
+
+      return reply.send({
+        success: true,
+        data: formatted,
+        count: formatted.length,
+      });
+    } catch (error) {
+      req.log.error(error);
+      return reply.status(500).send({
+        success: false,
+        message: 'Failed to retrieve customer rides',
         error: String(error),
       });
     }

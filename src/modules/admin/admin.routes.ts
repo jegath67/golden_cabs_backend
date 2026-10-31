@@ -9,6 +9,7 @@ export async function adminRoutes(app: FastifyInstance) {
   // Customer Management Endpoints
   app.get('/customers', adminGuard, adminController.getCustomers.bind(adminController));
   app.get('/customers/:id', adminGuard, adminController.getCustomerById.bind(adminController));
+  app.get('/customers/:id/rides', adminGuard, adminController.getCustomerRides.bind(adminController));
   app.patch('/customers/:id/status', superAdminGuard, adminController.updateCustomerStatus.bind(adminController));
   app.post('/customers', superAdminGuard, adminController.addCustomer.bind(adminController));
 
