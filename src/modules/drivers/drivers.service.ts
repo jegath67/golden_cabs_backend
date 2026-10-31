@@ -1,5 +1,6 @@
 import { prisma } from '../../config/prisma';
 import { notificationsService } from '../notifications/notifications.service';
+import { unavailabilityService } from '../unavailability/unavailability.service';
 
 export class DriversService {
   async getDriverByUserId(userId: string) {
@@ -434,6 +435,17 @@ export class DriversService {
       // 2. Guard: Check if Driver Profile is Approved
       if (driver.approvalStatus !== 'APPROVED') {
         throw new Error('Your driver profile is not approved yet.');
+      }
+
+      // Guard: Check Scheduled Unavailability for Today
+      const todayDateStr = unavailabilityService.normalizeDate(new Date());
+      const isTodayBlocked = await unavailabilityService.isUnavailable(
+        driver.id,
+        driver.assignedVehicleId,
+        todayDateStr
+      );
+      if (isTodayBlocked) {
+        throw new Error(`Cannot start shift: You or your vehicle are scheduled unavailable today (${todayDateStr}). Please clear your unavailability schedule first.`);
       }
 
       // 3. Guard: Check persona-specific vehicle requirements & vehicle status

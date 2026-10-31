@@ -1,5 +1,6 @@
 import { prisma } from '../../config/prisma';
 import { standardizeTripType, StandardizedTripType } from '../../utils/trip-type.helper';
+import { unavailabilityService } from '../unavailability/unavailability.service';
 
 export interface DriverAvailabilityResult {
   driverId: string;
@@ -269,7 +270,7 @@ export class DriverAvailabilityService {
       });
     }
 
-    // Fix 2: Dispatch Validation — only VERIFIED vehicles receive rides
+    // Fix 2: Dispatch Validation ï¿½ only VERIFIED vehicles receive rides
     if (effectiveVehicle.status !== 'VERIFIED') {
       return wrap({
         isAvailable: false,
@@ -312,10 +313,27 @@ export class DriverAvailabilityService {
       }
     }
 
-    // 3. Shift / Online Status for Instant Rides
+    // 3. Unavailability Schedule Guard (Immediate & Scheduled)
     const requestedPickupTime = (targetRide.isScheduled && targetRide.scheduledAt)
       ? targetRide.scheduledAt
       : now;
+
+    const targetDateStr = unavailabilityService.normalizeDate(requestedPickupTime);
+    const isDateBlocked = await unavailabilityService.isUnavailable(
+      driver.id,
+      effectiveVehicle.id,
+      targetDateStr
+    );
+
+    if (isDateBlocked) {
+      return wrap({
+        isAvailable: false,
+        reasonCode: 'SCHEDULED_UNAVAILABLE',
+        reasonMessage: `Driver or vehicle is scheduled unavailable on ${targetDateStr}. No immediate or scheduled rides can be assigned.`,
+        driver,
+        vehicle: effectiveVehicle,
+      });
+    }
 
     const isInstantRide = !targetRide.isScheduled || requestedPickupTime.getTime() <= now.getTime() + 15 * 60 * 1000;
 
