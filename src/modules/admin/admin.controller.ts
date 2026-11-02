@@ -86,6 +86,8 @@ function formatRideResponse(r: any) {
     isElite,
     category: isElite ? 'ELITE' : (meta.category || 'REGULAR'),
     datetime: finalDatetime,
+    isScheduled,
+    scheduledAt: meta.scheduledAt ? String(meta.scheduledAt) : null,
     status: displayStatus,
     dbStatus: r.status,
     isDriverAccepted: r.status === 'ACCEPTED' || ['EN_ROUTE', 'ARRIVED', 'ONGOING', 'COMPLETED'].includes(r.status),
@@ -576,6 +578,19 @@ export class AdminController {
         });
       }
 
+      // Reject assignment if scheduled ride pickup time has already expired
+      const targetRide = driverAvailabilityService.extractRideTarget(ride);
+      if (
+        targetRide.isScheduled &&
+        targetRide.scheduledAt &&
+        targetRide.scheduledAt.getTime() < Date.now()
+      ) {
+        return reply.status(400).send({
+          success: false,
+          message: 'Scheduled trip time expired. Driver assignment is not allowed.',
+        });
+      }
+
       // 2. Locate candidate driver strictly (NO silent fallback to first driver!)
       const rawStr = String(driverId).trim();
       const cleanDriverId = rawStr
@@ -615,7 +630,6 @@ export class AdminController {
       const finalVehicleId = vehicleId || matchedDriver.assignedVehicleId || matchedDriver.assignedVehicle?.id || null;
 
       // 3. Centralized Driver Availability & Time-Conflict Validation
-      const targetRide = driverAvailabilityService.extractRideTarget(ride);
       const availability = await driverAvailabilityService.evaluateDriverAvailability(finalDriverId, targetRide);
 
       if (!availability.isAvailable) {
