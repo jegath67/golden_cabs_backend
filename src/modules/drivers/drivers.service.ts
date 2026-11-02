@@ -400,14 +400,34 @@ export class DriversService {
       }).catch((err) => console.error('Error notifying driver of doc submission:', err));
     }
 
-    // Notify Admins
+    // Notify Admins (Unified Single Notification for Driver + Vehicle Onboarding)
     const driverName = data.name || updated.user?.name || 'Driver';
     const driverPhone = updated.user?.phone || '';
+
+    // Check if the driver has an owned vehicle or assigned vehicle
+    const vehicle = (updated.ownedVehicles && updated.ownedVehicles.length > 0)
+      ? updated.ownedVehicles[0]
+      : updated.assignedVehicle;
+
+    let adminTitle = '📋 Driver Documents Submitted';
+    let adminMessage = `${driverName} (${driverPhone}) submitted documents for KYC approval.`;
+    const adminData: any = { driverId: updated.id, userId: updated.userId };
+
+    if (vehicle) {
+      const vehName = `${vehicle.brand || ''} ${vehicle.model || ''}`.trim();
+      const vehNum = vehicle.vehicleNumber ? ` (${vehicle.vehicleNumber})` : '';
+      adminTitle = '📋 Driver & Vehicle Registration Submitted';
+      adminMessage = `${driverName} (${driverPhone}) registered with ${vehName || 'Vehicle'}${vehNum} & submitted documents for approval.`;
+      adminData.vehicleId = vehicle.id;
+      adminData.vehicleNumber = vehicle.vehicleNumber;
+      adminData.vehicleName = vehName;
+    }
+
     await notificationsService.sendToAdmins({
-      title: '📋 Driver Documents Submitted',
-      message: `${driverName} (${driverPhone}) submitted documents for KYC approval.`,
+      title: adminTitle,
+      message: adminMessage,
       type: 'admin_driver_registered',
-      data: { driverId: updated.id, userId: updated.userId },
+      data: adminData,
     }).catch((err) => console.error('Error notifying admins of driver KYC:', err));
 
     return updated;

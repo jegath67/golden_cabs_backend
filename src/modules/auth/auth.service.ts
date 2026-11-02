@@ -337,14 +337,8 @@ export class AuthService {
       });
     }
 
-    if (isNewUser && role === 'DRIVER') {
-      notificationsService.sendToAdmins({
-        title: '👤 New Driver Registered',
-        message: `${user.name || 'New Driver'} (${user.phone}) registered for onboarding.`,
-        type: 'admin_driver_registered',
-        data: { driverId: user.driverProfile?.id || '', userId: user.id },
-      }).catch((err) => console.error('Error notifying admins of new driver:', err));
-    }
+    // Do not notify admins on raw OTP verification because onboarding is not completed yet.
+    // The unified notification will be sent once the driver actually submits their profile/vehicle/documents.
 
     return {
       user,

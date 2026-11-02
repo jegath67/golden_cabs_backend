@@ -137,30 +137,37 @@ export class VehiclesService {
       include: {
         photos: true,
         assignedHub: true,
-        owner: { select: { userId: true, user: { select: { name: true, phone: true } } } },
+        owner: { select: { userId: true, approvalStatus: true, user: { select: { name: true, phone: true } } } },
       },
     });
 
-    // 1. Notify Partner/Owner if ownerId exists
-    if (created.owner?.userId) {
-      await notificationsService.sendToUser({
-        userId: created.owner.userId,
-        title: '🚕 Vehicle Submitted for Approval',
-        message: `${created.brand} ${created.model} (${created.vehicleNumber}) has been submitted for admin verification.`,
-        type: 'vehicle_submitted',
-        data: { vehicleId: created.id, vehicleNumber: created.vehicleNumber },
-        saveToDb: true,
-      }).catch((err) => console.error('Error notifying partner of vehicle submission:', err));
-    }
+    // Only notify if owner is already approved (existing partner adding extra car).
+    // During initial onboarding (approvalStatus !== 'APPROVED'), skip standalone notifications
+    // as it will be included in the unified onboarding notification when documents are submitted.
+    const isInitialOnboarding = created.owner && created.owner.approvalStatus !== 'APPROVED';
 
-    // 2. Notify Admins
-    const ownerName = created.owner?.user?.name || 'Partner';
-    await notificationsService.sendToAdmins({
-      title: '📋 New Vehicle Added for Verification',
-      message: `${ownerName} added ${created.brand} ${created.model} (${created.vehicleNumber}). Pending approval.`,
-      type: 'admin_vehicle_verification',
-      data: { vehicleId: created.id, vehicleNumber: created.vehicleNumber },
-    }).catch((err) => console.error('Error notifying admin of new vehicle:', err));
+    if (!isInitialOnboarding) {
+      // 1. Notify Partner/Owner if ownerId exists
+      if (created.owner?.userId) {
+        await notificationsService.sendToUser({
+          userId: created.owner.userId,
+          title: '🚕 Vehicle Submitted for Approval',
+          message: `${created.brand} ${created.model} (${created.vehicleNumber}) has been submitted for admin verification.`,
+          type: 'vehicle_submitted',
+          data: { vehicleId: created.id, vehicleNumber: created.vehicleNumber },
+          saveToDb: true,
+        }).catch((err) => console.error('Error notifying partner of vehicle submission:', err));
+      }
+
+      // 2. Notify Admins
+      const ownerName = created.owner?.user?.name || 'Partner';
+      await notificationsService.sendToAdmins({
+        title: '📋 New Vehicle Added for Verification',
+        message: `${ownerName} added ${created.brand} ${created.model} (${created.vehicleNumber}). Pending approval.`,
+        type: 'admin_vehicle_verification',
+        data: { vehicleId: created.id, vehicleNumber: created.vehicleNumber },
+      }).catch((err) => console.error('Error notifying admin of new vehicle:', err));
+    }
 
     return created;
   }
