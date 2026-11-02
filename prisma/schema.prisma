@@ -627,5 +627,26 @@ model AdvertisingPartner {
   updatedAt    DateTime @updatedAt
 }
 
+model PricingSlab {
+  id                  String   @id @default(uuid())
+  vehicleType         String   // Hatchback, Sedan, SUV, Premium
+  rideType            String   // Local Ride, Local Round Trip, Outstation One Way, Outstation Round Trip
+  baseFare            Float    @default(0.0)
+  includedKm          Float    @default(0.0)
+  extraKmCharge       Float    @default(0.0)
+  waitCharge          Float    @default(0.0)
+  nightChargeEnabled  Boolean  @default(false)
+  surgePricingEnabled Boolean  @default(false)
+  surgeMultiplier     Float    @default(1.0)
+  status              String   @default("Active") // Active, Inactive
+  zone                String   @default("All Zones")
+  meta                Json?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([vehicleType, rideType])
+  @@index([status])
+}
+
 
 

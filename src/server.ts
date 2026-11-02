@@ -24,6 +24,7 @@ import { bannersRoutes } from './modules/banners/banners.routes';
 import { advertisingPartnersRoutes } from './modules/advertising-partners/advertising-partners.routes';
 import { supportRoutes } from './modules/support/support.routes';
 import { unavailabilityRoutes } from './modules/unavailability/unavailability.routes';
+import { pricingSlabsRoutes } from './modules/pricing-slabs/pricing-slabs.routes';
 import { schedulerService } from './modules/scheduler/scheduler.service';
 
 const uploadsDir = path.join(process.cwd(), 'uploads');
@@ -152,6 +153,7 @@ app.register(bannersRoutes, { prefix: '/api/banners' });
 app.register(advertisingPartnersRoutes, { prefix: '/api/advertising-partners' });
 app.register(supportRoutes, { prefix: '/api/support' });
 app.register(unavailabilityRoutes, { prefix: '/api' });
+app.register(pricingSlabsRoutes, { prefix: '/api/pricing-slabs' });
 
 const start = async () => {
   try {

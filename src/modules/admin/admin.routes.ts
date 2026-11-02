@@ -24,4 +24,11 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/sub-admins', superAdminGuard, adminController.createSubAdmin.bind(adminController));
   app.patch('/sub-admins/:id', superAdminGuard, adminController.updateSubAdmin.bind(adminController));
   app.delete('/sub-admins/:id', superAdminGuard, adminController.deleteSubAdmin.bind(adminController));
+
+  // Driver Payouts Management Endpoints
+  app.get('/payouts', adminGuard, adminController.getPayouts.bind(adminController));
+  app.patch('/payouts/:id/status', superAdminGuard, adminController.updatePayoutStatus.bind(adminController));
+
+  // Payment Overview & Transactions Endpoints
+  app.get('/payments', adminGuard, adminController.getPayments.bind(adminController));
 }

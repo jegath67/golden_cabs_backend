@@ -918,6 +918,215 @@ export class AdminController {
       return reply.status(400).send({ success: false, message: error.message || 'Failed to delete sub-admin' });
     }
   }
+
+  async getPayouts(req: FastifyRequest, reply: FastifyReply) {
+    try {
+      const { status } = req.query as { status?: string };
+
+      const where: any = {
+        type: 'WITHDRAWAL',
+      };
+      if (status && status !== 'All' && status !== 'All Status') {
+        const sUpper = status.toUpperCase();
+        if (sUpper === 'PAID' || sUpper === 'COMPLETED') where.status = 'COMPLETED';
+        else if (sUpper === 'PENDING') where.status = 'PENDING';
+        else if (sUpper === 'FAILED') where.status = 'FAILED';
+        else where.status = sUpper;
+      }
+
+      const txs = await prisma.walletTransaction.findMany({
+        where,
+        include: {
+          wallet: {
+            include: {
+              driver: {
+                include: {
+                  user: true,
+                  rides: {
+                    where: { status: 'COMPLETED' },
+                    select: { id: true },
+                  },
+                },
+              },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      const payouts = txs.map((tx) => {
+        const wallet = tx.wallet;
+        const driver = wallet?.driver;
+        const user = driver?.user;
+
+        let displayStatus = 'Pending';
+        if (tx.status === 'COMPLETED') displayStatus = 'Paid';
+        else if (tx.status === 'FAILED') displayStatus = 'Failed';
+
+        const created = tx.createdAt;
+        const dateStr = created.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+        const timeStr = created.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+
+        const earningsVal = wallet?.lifetimeEarnings || 0;
+        const ridesCount = driver?.rides?.length || 0;
+        const payoutAmt = tx.amount;
+        const commissionVal = Math.round(earningsVal * 0.1);
+
+        return {
+          id: tx.id,
+          transactionId: tx.id,
+          driverId: driver?.id ? formatDriverCode(driver.id) : 'DRV-0000',
+          rawDriverId: driver?.id || '',
+          driverName: user?.name || 'Driver Partner',
+          driverPhone: user?.phone || '',
+          driverPhoto: driver?.selfieImage || null,
+          earnings: `₹ ${Math.round(earningsVal).toLocaleString()}`,
+          rides: `${ridesCount} Rides`,
+          commission: `₹ ${commissionVal.toLocaleString()}`,
+          commissionPercent: '10%',
+          payoutAmount: `₹ ${Math.round(payoutAmt).toLocaleString()}`,
+          rawPayoutAmount: payoutAmt,
+          method: wallet?.bankAccountNumber ? 'Bank Transfer' : 'UPI',
+          methodDetail: wallet?.bankAccountNumber
+            ? `**** ${wallet.bankAccountNumber.slice(-4)}`
+            : (wallet?.bankIfsc || 'UPI Transfer'),
+          bankAccountNumber: wallet?.bankAccountNumber || '',
+          bankIfsc: wallet?.bankIfsc || '',
+          bankHolderName: wallet?.bankHolderName || '',
+          date: dateStr,
+          time: timeStr,
+          status: displayStatus,
+          createdAt: tx.createdAt.toISOString(),
+        };
+      });
+
+      return reply.send({ success: true, data: payouts });
+    } catch (error: any) {
+      return reply.status(500).send({ success: false, message: error.message || 'Failed to fetch payouts' });
+    }
+  }
+
+  async updatePayoutStatus(req: FastifyRequest, reply: FastifyReply) {
+    try {
+      const { id } = req.params as { id: string };
+      const { status } = req.body as { status: string };
+
+      const tx = await prisma.walletTransaction.findUnique({
+        where: { id },
+        include: { wallet: true },
+      });
+
+      if (!tx) {
+        return reply.status(404).send({ success: false, message: 'Payout transaction not found' });
+      }
+
+      let newStatus: any = 'COMPLETED';
+      const sUpper = status.toUpperCase();
+      if (sUpper === 'PAID' || sUpper === 'COMPLETED' || sUpper === 'APPROVED' || sUpper === 'SUCCESS') {
+        newStatus = 'COMPLETED';
+      } else if (sUpper === 'FAILED' || sUpper === 'REJECTED') {
+        newStatus = 'FAILED';
+      } else if (sUpper === 'PENDING') {
+        newStatus = 'PENDING';
+      }
+
+      await prisma.$transaction(async (prismaTx) => {
+        await prismaTx.walletTransaction.update({
+          where: { id },
+          data: { status: newStatus },
+        });
+
+        if (newStatus === 'COMPLETED') {
+          await prismaTx.wallet.update({
+            where: { id: tx.walletId },
+            data: {
+              pendingWithdrawals: {
+                decrement: Math.min(tx.wallet.pendingWithdrawals, tx.amount),
+              },
+            },
+          });
+        } else if (newStatus === 'FAILED') {
+          await prismaTx.wallet.update({
+            where: { id: tx.walletId },
+            data: {
+              balance: { increment: tx.amount },
+              pendingWithdrawals: {
+                decrement: Math.min(tx.wallet.pendingWithdrawals, tx.amount),
+              },
+            },
+          });
+        }
+      });
+
+      return reply.send({ success: true, message: `Payout status updated to ${newStatus}` });
+    } catch (error: any) {
+      return reply.status(500).send({ success: false, message: error.message || 'Failed to update payout status' });
+    }
+  }
+
+  async getPayments(req: FastifyRequest, reply: FastifyReply) {
+    try {
+      const rides = await prisma.ride.findMany({
+        where: {
+          status: { in: ['COMPLETED', 'ONGOING', 'ACCEPTED', 'ARRIVED'] },
+        },
+        include: {
+          customer: true,
+          driver: { include: { user: true } },
+          fareBreakdown: true,
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      const payments = rides.map((r) => {
+        const meta = (r.stops as any) || {};
+        const fare = r.finalFare || r.fareBreakdown?.totalFare || r.estimatedFare || 0.0;
+        const isPaid = r.paymentStatus === 'PAID' || r.status === 'COMPLETED';
+
+        return {
+          orderId: r.bookingCode || `GC-${r.id.substring(0, 5).toUpperCase()}`,
+          paymentId: r.fareBreakdown?.id ? `TXN${r.fareBreakdown.id.substring(0, 6).toUpperCase()}` : `TXN${r.id.substring(0, 6).toUpperCase()}`,
+          userName: r.customer?.name || 'Customer',
+          customerPhone: r.customer?.phone || '',
+          driverName: r.driver?.user?.name || 'Driver Partner',
+          driverPhone: r.driver?.user?.phone || '',
+          tripType: standardizeTripType({
+            customTripType: meta.customTripType,
+            tripType: r.tripType,
+            distanceKm: r.distanceKm,
+          }),
+          amount: fare,
+          paymentMode: r.paymentMethod || 'UPI',
+          status: isPaid,
+          timestamp: r.createdAt.toISOString(),
+          zone: meta.zone || 'Chennai',
+          pickupLocation: r.pickupAddress || r.pickupLocation || '',
+          dropLocation: r.dropAddress || r.dropLocation || '',
+          stops: meta.additionalStops || [],
+        };
+      });
+
+      const totalRevenue = payments.reduce((acc, p) => acc + (p.status ? p.amount : 0), 0);
+      const totalTransactions = payments.length;
+      const completedCount = payments.filter((p) => p.status).length;
+      const pendingCount = payments.filter((p) => !p.status).length;
+
+      return reply.send({
+        success: true,
+        data: {
+          payments,
+          stats: {
+            totalRevenue,
+            totalTransactions,
+            completedCount,
+            pendingCount,
+          },
+        },
+      });
+    } catch (error: any) {
+      return reply.status(500).send({ success: false, message: error.message || 'Failed to fetch payments' });
+    }
+  }
 }
 
 export const adminController = new AdminController();
