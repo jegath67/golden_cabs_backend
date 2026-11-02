@@ -22,7 +22,18 @@ function formatRideResponse(r: any) {
   const isScheduled = !!meta.isScheduled && !!meta.scheduledAt;
 
   let displayStatus = 'New Request';
-  if (isScheduled && !r.driverId && r.status === 'SEARCHING') {
+  const cancelReasonLower = (r.cancelReason || '').toLowerCase();
+  const isAutoExpired = isScheduled && (
+    cancelReasonLower.includes('30 minutes') ||
+    cancelReasonLower.includes('expired') ||
+    cancelReasonLower.includes('auto-cancel')
+  );
+
+  const isPendingOver30Mins = isScheduled && !r.driverId && r.status === 'SEARCHING' && r.createdAt && (Date.now() - new Date(r.createdAt).getTime()) >= 30 * 60 * 1000;
+
+  if (isAutoExpired || isPendingOver30Mins) {
+    displayStatus = 'TIME EXPIRED';
+  } else if (isScheduled && !r.driverId && r.status === 'SEARCHING') {
     displayStatus = 'Scheduled';
   } else if (r.status === 'SEARCHING') {
     displayStatus = r.driverId ? 'Assigned' : 'New Request';
@@ -86,6 +97,7 @@ function formatRideResponse(r: any) {
     isElite,
     category: isElite ? 'ELITE' : (meta.category || 'REGULAR'),
     datetime: finalDatetime,
+    createdAt: r.createdAt ? r.createdAt.toISOString() : null,
     isScheduled,
     scheduledAt: meta.scheduledAt ? String(meta.scheduledAt) : null,
     status: displayStatus,
@@ -578,13 +590,11 @@ export class AdminController {
         });
       }
 
-      // Reject assignment if scheduled ride pickup time has already expired
+      // Reject assignment if scheduled ride pickup time has already expired or 30 minutes elapsed from creation
       const targetRide = driverAvailabilityService.extractRideTarget(ride);
-      if (
-        targetRide.isScheduled &&
-        targetRide.scheduledAt &&
-        targetRide.scheduledAt.getTime() < Date.now()
-      ) {
+      const isPastPickup = targetRide.isScheduled && targetRide.scheduledAt && targetRide.scheduledAt.getTime() < Date.now();
+      const isOver30Mins = targetRide.isScheduled && ride.createdAt && (Date.now() - new Date(ride.createdAt).getTime()) >= 30 * 60 * 1000;
+      if (targetRide.isScheduled && (isPastPickup || isOver30Mins)) {
         return reply.status(400).send({
           success: false,
           message: 'Scheduled trip time expired. Driver assignment is not allowed.',

@@ -1,4 +1,7 @@
 import { vehiclesService } from '../vehicles/vehicles.service';
+import { prisma } from '../../config/prisma';
+import { notificationsService } from '../notifications/notifications.service';
+import { TripStatus } from '../../generated/prisma/client';
 
 interface SchedulerStatus {
   isRunning: boolean;
@@ -16,6 +19,7 @@ class SchedulerService {
   private lastResetCount = 0;
   private lastSkippedCount = 0;
   private isProcessing = false;
+  private isCheckingExpiredRides = false;
 
   /**
    * Initialize the scheduler at server boot
@@ -27,15 +31,17 @@ class SchedulerService {
     // Default lastRunDate to today so it only triggers at upcoming midnight, not on midday reboot
     this.lastRunDate = istDate;
 
-    console.log(`[SchedulerService] Initialized. Daily vehicle reset armed for next midnight IST.`);
+    console.log(`[SchedulerService] Initialized. Background tasks armed for vehicle reset & scheduled trip auto-expiry.`);
 
     // Check every 60 seconds
     this.timer = setInterval(() => {
       this.checkAndRunMidnightReset();
+      this.checkAndExpireUnassignedScheduledRides();
     }, 60 * 1000);
 
-    // Initial check in case server started precisely at 00:00
+    // Initial check in case server started precisely at 00:00 or pending expired rides exist
     this.checkAndRunMidnightReset();
+    this.checkAndExpireUnassignedScheduledRides();
   }
 
   stop() {
@@ -99,6 +105,107 @@ class SchedulerService {
   }
 
   /**
+   * Auto-cancels unassigned scheduled rides if:
+   * 1. 30 minutes have elapsed since booking creation (createdAt + 30m) without driver assignment.
+   * 2. The scheduled pickup time has arrived/passed without driver assignment.
+   * Sends push notification to the customer informing them of the auto-cancellation.
+   */
+  async checkAndExpireUnassignedScheduledRides() {
+    if (this.isCheckingExpiredRides) return;
+    this.isCheckingExpiredRides = true;
+
+    try {
+      const now = new Date();
+
+      // Fetch unassigned rides in SEARCHING or ACCEPTED status
+      const candidateRides = await prisma.ride.findMany({
+        where: {
+          driverId: null,
+          status: { in: [TripStatus.SEARCHING, TripStatus.ACCEPTED] },
+        },
+        include: {
+          customer: true,
+        },
+      });
+
+      for (const ride of candidateRides) {
+        const meta = (ride.stops as any) || {};
+        const isScheduled = !!meta.isScheduled || (typeof meta.scheduledAt === 'string' && meta.scheduledAt.trim().length > 0);
+
+        if (!isScheduled) {
+          continue;
+        }
+
+        const createdAtTime = ride.createdAt ? new Date(ride.createdAt).getTime() : 0;
+        const isOver30MinsFromCreation = createdAtTime > 0 && (now.getTime() - createdAtTime) >= 30 * 60 * 1000;
+
+        let isPastPickup = false;
+        if (meta.scheduledAt) {
+          const sDate = new Date(meta.scheduledAt);
+          if (!isNaN(sDate.getTime()) && sDate.getTime() <= now.getTime()) {
+            isPastPickup = true;
+          }
+        }
+
+        if (!isOver30MinsFromCreation && !isPastPickup) {
+          continue;
+        }
+
+        const cancelReason = isOver30MinsFromCreation
+          ? 'Auto-cancelled: Driver not assigned within 30 minutes of booking request'
+          : 'Auto-cancelled: Scheduled pickup time has passed without driver assignment';
+
+        console.log(`[SchedulerService] Auto-cancelling scheduled ride ${ride.bookingCode || ride.id}. Reason: ${cancelReason}`);
+
+        const couponCode = meta.couponCode;
+        const alreadyRestored = meta.couponRestored === true;
+
+        await prisma.$transaction(async (tx) => {
+          if (couponCode && !alreadyRestored) {
+            try {
+              const { couponsService } = await import('../coupons/coupons.service');
+              await couponsService.restoreCoupon(couponCode, tx);
+            } catch (couponErr) {
+              console.error(`[SchedulerService] Failed to restore coupon ${couponCode}:`, couponErr);
+            }
+          }
+
+          await tx.ride.update({
+            where: { id: ride.id },
+            data: {
+              status: TripStatus.CANCELLED,
+              cancelReason,
+              cancelledBy: 'SYSTEM',
+              stops: couponCode ? { ...meta, couponRestored: true } : meta,
+            },
+          });
+        });
+
+        // Send Push Notification to customer
+        try {
+          await notificationsService.sendToUser({
+            userId: ride.customerId,
+            title: '❌ Scheduled Ride Cancelled',
+            message: `Your scheduled booking (${ride.bookingCode || 'Trip'}) was cancelled as no driver was assigned within 30 minutes. Any payment or coupons have been refunded.`,
+            type: 'ride_cancelled',
+            data: {
+              rideId: ride.id,
+              bookingCode: ride.bookingCode || '',
+              reason: cancelReason,
+            },
+          });
+        } catch (notifErr) {
+          console.error(`[SchedulerService] Failed to send cancel notification for ride ${ride.id}:`, notifErr);
+        }
+      }
+    } catch (err) {
+      console.error('[SchedulerService] Error running checkAndExpireUnassignedScheduledRides:', err);
+    } finally {
+      this.isCheckingExpiredRides = false;
+    }
+  }
+
+  /**
    * Manual trigger (for Admin API or testing)
    */
   async triggerManualReset(options?: { force?: boolean }) {
@@ -134,4 +241,3 @@ class SchedulerService {
 }
 
 export const schedulerService = new SchedulerService();
-
