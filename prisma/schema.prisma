@@ -116,6 +116,8 @@ enum WalletTxType {
 
 enum WalletTxStatus {
   PENDING
+  APPROVED
+  PROCESSING
   COMPLETED
   FAILED
 }
@@ -426,6 +428,11 @@ model WalletTransaction {
   status          WalletTxStatus @default(PENDING)
   description     String
   referenceRideId String?
+  utrNumber       String?
+  rejectionReason String?
+  previousBalance Float?
+  newBalance      Float?
+  paidAt          DateTime?
   createdAt       DateTime       @default(now())
 }
 
@@ -646,6 +653,15 @@ model PricingSlab {
 
   @@index([vehicleType, rideType])
   @@index([status])
+}
+
+model PlatformSetting {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  value       String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
 
 

@@ -28,7 +28,15 @@ export async function adminRoutes(app: FastifyInstance) {
   // Driver Payouts Management Endpoints
   app.get('/payouts', adminGuard, adminController.getPayouts.bind(adminController));
   app.patch('/payouts/:id/status', superAdminGuard, adminController.updatePayoutStatus.bind(adminController));
+  app.get('/settlements/overview', adminGuard, adminController.getSettlementsOverview.bind(adminController));
+
+  // Platform Commission Settings Endpoints
+  app.get('/settings/commission', adminGuard, adminController.getCommissionSettings.bind(adminController));
+  app.patch('/settings/commission', superAdminGuard, adminController.updateCommissionSettings.bind(adminController));
 
   // Payment Overview & Transactions Endpoints
   app.get('/payments', adminGuard, adminController.getPayments.bind(adminController));
+
+  // Live Map Tracking Endpoint
+  app.get('/live-map', adminGuard, adminController.getLiveMapData.bind(adminController));
 }

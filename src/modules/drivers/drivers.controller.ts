@@ -248,7 +248,7 @@ export class DriversController {
       if (!driver) {
         return reply.status(404).send({ success: false, message: 'Driver profile not found' });
       }
-      const { title, subject, category, description } = (req.body as any) || {};
+      const { title, subject, category, description, tripId } = (req.body as any) || {};
       const finalTitle = title || subject;
       if (!finalTitle || !description) {
         return reply.status(400).send({ success: false, message: 'Title and description are required' });
@@ -257,6 +257,7 @@ export class DriversController {
         title: finalTitle,
         category: category || 'General Support',
         description,
+        tripId: tripId ? String(tripId).trim() : undefined,
       });
       return reply.status(201).send({ success: true, message: 'Report submitted successfully', data: report });
     } catch (error: any) {

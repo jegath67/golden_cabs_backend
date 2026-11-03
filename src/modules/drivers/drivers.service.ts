@@ -150,7 +150,7 @@ export class DriversService {
 
   async createDriverReport(
     driverProfileId: string,
-    data: { title: string; category: string; description: string }
+    data: { title: string; category: string; description: string; tripId?: string }
   ) {
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS "DriverReport" (
@@ -189,8 +189,8 @@ export class DriversService {
         await prisma.$executeRawUnsafe(
           `INSERT INTO "SupportTicket" (
             "id", "ticketCode", "userId", "userName", "userPhone", "userRole",
-            "complaintType", "category", "subject", "description", "priority", "status", "zone", "createdAt", "updatedAt"
-          ) VALUES ($1, $2, $3, $4, $5, 'DRIVER', 'Driver', $6, $7, $8, 'Medium', 'Open', 'Puducherry', NOW(), NOW())
+            "complaintType", "category", "subject", "description", "tripId", "priority", "status", "zone", "createdAt", "updatedAt"
+          ) VALUES ($1, $2, $3, $4, $5, 'DRIVER', 'Driver', $6, $7, $8, $9, 'Medium', 'Open', 'Puducherry', NOW(), NOW())
           ON CONFLICT ("ticketCode") DO NOTHING`,
           uuid,
           id,
@@ -199,7 +199,8 @@ export class DriversService {
           driver.user.phone || '',
           data.category.trim(),
           data.title.trim(),
-          data.description.trim()
+          data.description.trim(),
+          data.tripId || null
         );
       }
     } catch (e) {

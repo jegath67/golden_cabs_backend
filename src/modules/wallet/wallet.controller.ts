@@ -18,6 +18,28 @@ export class WalletController {
     }
   }
 
+  async getDashboard(req: FastifyRequest<any>, reply: FastifyReply) {
+    const user = req.user as { id: string };
+
+    try {
+      const dashboard = await walletService.getEarningsDashboard(user.id);
+      return reply.send({ success: true, data: dashboard });
+    } catch (error: any) {
+      return reply.status(400).send({ success: false, message: error.message || 'Failed to fetch earnings dashboard' });
+    }
+  }
+
+  async getCashouts(req: FastifyRequest<any>, reply: FastifyReply) {
+    const user = req.user as { id: string };
+
+    try {
+      const cashouts = await walletService.getCashoutHistory(user.id);
+      return reply.send({ success: true, data: cashouts });
+    } catch (error: any) {
+      return reply.status(400).send({ success: false, message: error.message || 'Failed to fetch cashout history' });
+    }
+  }
+
   async updateBankDetails(req: FastifyRequest<any>, reply: FastifyReply) {
     const user = req.user as { id: string };
     const { bankAccountNumber, bankIfsc, bankHolderName } = (req.body as any) || {};
@@ -45,15 +67,16 @@ export class WalletController {
     const user = req.user as { id: string };
     const { amount } = (req.body as any) || {};
 
-    if (!amount || amount <= 0) {
+    const numAmount = Number(amount);
+    if (!numAmount || isNaN(numAmount) || numAmount <= 0) {
       return reply.status(400).send({ success: false, message: 'Valid amount is required' });
     }
 
     try {
-      await walletService.requestWithdrawal(user.id, amount);
-      return reply.send({ success: true, message: 'Withdrawal request submitted successfully' });
+      const res = await walletService.requestWithdrawal(user.id, numAmount);
+      return reply.send({ success: true, message: 'Cashout request submitted successfully', data: res });
     } catch (error: any) {
-      return reply.status(400).send({ success: false, message: error.message || 'Failed to submit withdrawal' });
+      return reply.status(400).send({ success: false, message: error.message || 'Failed to submit cashout' });
     }
   }
 }

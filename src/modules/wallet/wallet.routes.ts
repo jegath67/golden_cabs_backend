@@ -9,6 +9,18 @@ export async function walletRoutes(app: FastifyInstance) {
     walletController.getMyWallet.bind(walletController)
   );
 
+  app.get(
+    '/dashboard',
+    { preHandler: [requireRoles(['DRIVER'])] },
+    walletController.getDashboard.bind(walletController)
+  );
+
+  app.get(
+    '/payouts',
+    { preHandler: [requireRoles(['DRIVER'])] },
+    walletController.getCashouts.bind(walletController)
+  );
+
   app.put(
     '/bank-details',
     { preHandler: [requireRoles(['DRIVER'])] },
