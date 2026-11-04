@@ -26,6 +26,8 @@ import { supportRoutes } from './modules/support/support.routes';
 import { unavailabilityRoutes } from './modules/unavailability/unavailability.routes';
 import { pricingSlabsRoutes } from './modules/pricing-slabs/pricing-slabs.routes';
 import { schedulerService } from './modules/scheduler/scheduler.service';
+import { initRedis, isRedisAvailable, disconnectRedis } from './config/redis';
+import { locationCacheService } from './modules/drivers/location-cache.service';
 
 const uploadsDir = path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadsDir)) {
@@ -123,6 +125,8 @@ app.get('/health', async () => {
       success: true,
       message: 'Golden Cabs Backend is running',
       database: 'Connected to PostgreSQL',
+      redis: isRedisAvailable() ? 'Connected' : 'In-Memory Cache (Active)',
+      locationCacheSync: 'Active (5s interval)',
       timestamp: new Date().toISOString(),
     };
   } catch (error) {
@@ -160,6 +164,12 @@ const start = async () => {
     // Initialize Firebase Admin (Safe fallback if credentials missing)
     initFirebase();
 
+    // Initialize Redis (Safe non-blocking fallback to in-memory if standalone Redis is absent)
+    initRedis();
+
+    // Initialize background batch sync for real-time driver GPS locations (flushes dirty coords every 5s)
+    locationCacheService.init(5000);
+
     await app.listen({
       port: 3000,
       host: '0.0.0.0',
@@ -174,5 +184,23 @@ const start = async () => {
     process.exit(1);
   }
 };
+
+// Graceful shutdown handling
+const signals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM'];
+signals.forEach((signal) => {
+  process.on(signal, async () => {
+    console.log(`\nReceived ${signal}. Gracefully shutting down...`);
+    try {
+      await locationCacheService.destroy();
+      await disconnectRedis();
+      await app.close();
+      console.log('Server and location cache shut down cleanly.');
+      process.exit(0);
+    } catch (err) {
+      console.error('Error during shutdown:', err);
+      process.exit(1);
+    }
+  });
+});
 
 start();

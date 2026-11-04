@@ -2,6 +2,7 @@ import { prisma } from '../../config/prisma';
 import { notificationsService } from '../notifications/notifications.service';
 import { platformSettingsService } from '../settings/platform-settings.service';
 import { unavailabilityService } from '../unavailability/unavailability.service';
+import { locationCacheService } from '../drivers/location-cache.service';
 import { TripStatus } from '../../generated/prisma/client';
 import { standardizeTripType } from '../../utils/trip-type.helper';
 
@@ -762,6 +763,11 @@ export class RidesService {
 
       return updated;
     });
+
+    // Flush final driver location to database immediately upon trip completion
+    if (updatedRide.driverId) {
+      locationCacheService.flushDriverImmediately(updatedRide.driverId).catch(() => {});
+    }
 
     // Send notifications to Customer and Driver
     notificationsService.sendToUser({

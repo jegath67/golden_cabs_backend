@@ -2,6 +2,7 @@ import { prisma } from '../../config/prisma';
 import { notificationsService } from '../notifications/notifications.service';
 import { unavailabilityService } from '../unavailability/unavailability.service';
 import { normalizePhone } from '../auth/auth.service';
+import { locationCacheService } from './location-cache.service';
 
 export class DriversService {
   async getDriverByUserId(userId: string) {
@@ -503,7 +504,7 @@ export class DriversService {
       }
     }
 
-    return prisma.driverProfile.update({
+    const updatedProfile = await prisma.driverProfile.update({
       where: { userId },
       data: {
         shiftStatus,
@@ -513,6 +514,13 @@ export class DriversService {
         assignedVehicle: true,
       },
     });
+
+    if (!isOnline) {
+      // Flush location to PostgreSQL immediately when going offline
+      locationCacheService.flushDriverImmediately(driver.id).catch(() => {});
+    }
+
+    return updatedProfile;
   }
 
   async updateLocation(
@@ -549,21 +557,23 @@ export class DriversService {
       }
     }
 
-    const updated = await prisma.driverProfile.update({
-      where: { userId },
-      data: {
-        currentLatitude: data.latitude,
-        currentLongitude: data.longitude,
-      },
-      select: {
-        id: true,
-        currentLatitude: true,
-        currentLongitude: true,
-        updatedAt: true,
-      },
+    // Save to Redis / In-Memory cache and schedule periodic batch dump to PostgreSQL
+    const cached = await locationCacheService.saveDriverLocation(driver.id, {
+      userId,
+      latitude: data.latitude,
+      longitude: data.longitude,
+      heading: data.heading,
+      speed: data.speed,
+      accuracy: data.accuracy,
+      rideId: data.rideId,
     });
 
-    return updated;
+    return {
+      id: driver.id,
+      currentLatitude: cached.latitude,
+      currentLongitude: cached.longitude,
+      updatedAt: new Date(cached.updatedAt),
+    };
   }
 
   async selectHub(userId: string, hubId: string) {

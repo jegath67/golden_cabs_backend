@@ -3,6 +3,7 @@ import { prisma } from '../../config/prisma';
 import { standardizeTripType } from '../../utils/trip-type.helper';
 import { driverAvailabilityService } from '../rides/driver-availability.service';
 import { platformSettingsService } from '../settings/platform-settings.service';
+import { locationCacheService } from '../drivers/location-cache.service';
 
 function formatDriverCode(driverId?: string | null): string | null {
   if (!driverId) return null;
@@ -1440,6 +1441,8 @@ export class AdminController {
         salem: { lat: 11.6643, lng: 78.1460 },
       };
 
+      const cachedLocations = locationCacheService.getAllCachedLocations();
+
       const mappedDrivers = drivers.map((d, index) => {
         const user = d.user;
         const activeRide = d.rides && d.rides.length > 0 ? d.rides[0] : null;
@@ -1452,8 +1455,9 @@ export class AdminController {
           displayStatus = 'Online';
         }
 
-        let lat = d.currentLatitude;
-        let lng = d.currentLongitude;
+        const cached = cachedLocations.get(d.id);
+        let lat = cached ? cached.latitude : d.currentLatitude;
+        let lng = cached ? cached.longitude : d.currentLongitude;
         if (!lat || !lng || (lat === 0 && lng === 0)) {
           const base = (d.assignedHub?.latitude && d.assignedHub?.longitude)
             ? { lat: d.assignedHub.latitude, lng: d.assignedHub.longitude }
