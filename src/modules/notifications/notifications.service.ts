@@ -471,23 +471,34 @@ export class NotificationsService {
   }
 
   /**
-   * Delete a notification for a user
+   * Delete a notification for a user (or globally if admin)
    */
-  async deleteNotification(notificationId: string, userId: string) {
+  async deleteNotification(notificationId: string, userId: string, isAdmin = false) {
     return prisma.notification.deleteMany({
-      where: { id: notificationId, userId },
+      where: isAdmin ? { id: notificationId } : { id: notificationId, userId },
     });
   }
 
   /**
-   * Delete multiple notifications for a user
+   * Delete multiple notifications for a user (or globally if admin)
    */
-  async deleteNotifications(notificationIds: string[], userId: string) {
+  async deleteNotifications(notificationIds: string[], userId: string, isAdmin = false) {
     return prisma.notification.deleteMany({
-      where: {
-        id: { in: notificationIds },
-        userId,
-      },
+      where: isAdmin
+        ? { id: { in: notificationIds } }
+        : {
+            id: { in: notificationIds },
+            userId,
+          },
+    });
+  }
+
+  /**
+   * Clear all notifications for a user
+   */
+  async clearAllNotifications(userId: string) {
+    return prisma.notification.deleteMany({
+      where: { userId },
     });
   }
 

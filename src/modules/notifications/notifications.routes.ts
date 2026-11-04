@@ -32,6 +32,16 @@ export async function notificationsRoutes(app: FastifyInstance) {
     notificationsController.markAllAsRead.bind(notificationsController)
   );
   app.delete(
+    '/clear-all',
+    { preHandler: [authenticate] },
+    notificationsController.clearAllNotifications.bind(notificationsController)
+  );
+  app.delete(
+    '/all',
+    { preHandler: [authenticate] },
+    notificationsController.clearAllNotifications.bind(notificationsController)
+  );
+  app.delete(
     '/:id',
     { preHandler: [authenticate] },
     notificationsController.deleteNotification.bind(notificationsController)

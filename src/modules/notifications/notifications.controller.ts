@@ -225,7 +225,10 @@ export class NotificationsController {
 
   async deleteNotification(req: FastifyRequest<any>, reply: FastifyReply) {
     const { id } = req.params as { id: string };
-    const userId = (req.user as any)?.id;
+    const user = req.user as any;
+    const userId = user?.id;
+    const role = user?.role;
+    const isAdmin = role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'ZONE_ADMIN';
 
     if (!userId) {
       return reply.status(401).send({
@@ -235,7 +238,15 @@ export class NotificationsController {
     }
 
     try {
-      await notificationsService.deleteNotification(id, userId);
+      if (id === 'all' || id === 'clear-all') {
+        await notificationsService.clearAllNotifications(userId);
+        return reply.send({
+          success: true,
+          message: 'All notifications cleared successfully',
+        });
+      }
+
+      await notificationsService.deleteNotification(id, userId, isAdmin);
       return reply.send({
         success: true,
         message: 'Notification deleted successfully',
@@ -250,7 +261,65 @@ export class NotificationsController {
   }
 
   async deleteNotifications(req: FastifyRequest<any>, reply: FastifyReply) {
-    const { ids } = (req.body as any) || {};
+    const body = (req.body as any) || {};
+    const query = (req.query as any) || {};
+    const user = req.user as any;
+    const userId = user?.id;
+    const role = user?.role;
+    const isAdmin = role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'ZONE_ADMIN';
+
+    if (!userId) {
+      return reply.status(401).send({
+        success: false,
+        message: 'Unauthorized: Missing authenticated user ID',
+      });
+    }
+
+    try {
+      // Check if clearing all notifications
+      const isClearAll =
+        body.all === true ||
+        body.all === 'true' ||
+        query.all === true ||
+        query.all === 'true';
+
+      if (isClearAll) {
+        await notificationsService.clearAllNotifications(userId);
+        return reply.send({
+          success: true,
+          message: 'All notifications cleared successfully',
+        });
+      }
+
+      // Extract ids from body (array or comma-delimited) or query parameters
+      let targetIds: string[] = [];
+      if (Array.isArray(body.ids)) {
+        targetIds = body.ids.map((i: any) => String(i).trim()).filter(Boolean);
+      } else if (typeof body.ids === 'string') {
+        targetIds = body.ids.split(',').map((i: string) => i.trim()).filter(Boolean);
+      } else if (typeof query.ids === 'string') {
+        targetIds = query.ids.split(',').map((i: string) => i.trim()).filter(Boolean);
+      }
+
+      if (targetIds.length > 0) {
+        await notificationsService.deleteNotifications(targetIds, userId, isAdmin);
+      }
+
+      return reply.send({
+        success: true,
+        message: 'Notifications deleted successfully',
+        deletedCount: targetIds.length,
+      });
+    } catch (error: any) {
+      return reply.status(500).send({
+        success: false,
+        message: 'Failed to delete notifications',
+        error: error.message || String(error),
+      });
+    }
+  }
+
+  async clearAllNotifications(req: FastifyRequest<any>, reply: FastifyReply) {
     const userId = (req.user as any)?.id;
 
     if (!userId) {
@@ -261,17 +330,15 @@ export class NotificationsController {
     }
 
     try {
-      if (Array.isArray(ids) && ids.length > 0) {
-        await notificationsService.deleteNotifications(ids, userId);
-      }
+      await notificationsService.clearAllNotifications(userId);
       return reply.send({
         success: true,
-        message: 'Notifications deleted successfully',
+        message: 'All notifications cleared successfully',
       });
     } catch (error: any) {
       return reply.status(500).send({
         success: false,
-        message: 'Failed to delete notifications',
+        message: 'Failed to clear all notifications',
         error: error.message || String(error),
       });
     }
