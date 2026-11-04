@@ -27,7 +27,11 @@ export class DriversController {
   }
 
   async toggleShift(req: FastifyRequest<any>, reply: FastifyReply) {
-    const { shiftStatus } = (req.body as { shiftStatus?: 'ON_SHIFT' | 'OFF_SHIFT' }) || {};
+    const body = (req.body as { shiftStatus?: 'ON_SHIFT' | 'OFF_SHIFT'; isOnline?: boolean }) || {};
+    let shiftStatus = body.shiftStatus;
+    if (!shiftStatus && body.isOnline !== undefined) {
+      shiftStatus = body.isOnline ? 'ON_SHIFT' : 'OFF_SHIFT';
+    }
     if (!shiftStatus) {
       return reply.status(400).send({ success: false, message: 'shiftStatus is required' });
     }
@@ -165,6 +169,16 @@ export class DriversController {
       return reply.send({ success: true, message: `Driver ${approvalStatus}`, data: updated });
     } catch (error: any) {
       return reply.status(400).send({ success: false, message: error.message || 'Failed to verify driver' });
+    }
+  }
+
+  async createDriver(req: FastifyRequest<any>, reply: FastifyReply) {
+    try {
+      const data = req.body as any;
+      const driver = await driversService.createDriver(data);
+      return reply.send({ success: true, message: 'Driver created successfully', data: driver });
+    } catch (error: any) {
+      return reply.status(400).send({ success: false, message: error.message || 'Failed to create driver' });
     }
   }
 

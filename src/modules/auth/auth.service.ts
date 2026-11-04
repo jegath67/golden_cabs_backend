@@ -133,8 +133,14 @@ export class AuthService {
     }
 
     if (purpose === 'REGISTER') {
-      const existing = await prisma.user.findUnique({
-        where: { phone: cleanPhone },
+      const existing = await prisma.user.findFirst({
+        where: {
+          OR: [
+            { phone: cleanPhone },
+            { phone: `+91${cleanPhone}` },
+            { phone: `91${cleanPhone}` },
+          ],
+        },
       });
       if (existing) {
         throw new Error('This mobile number is already registered. Please login to continue.');
@@ -142,8 +148,14 @@ export class AuthService {
     }
 
     if (purpose === 'LOGIN') {
-      const existing = await prisma.user.findUnique({
-        where: { phone: cleanPhone },
+      const existing = await prisma.user.findFirst({
+        where: {
+          OR: [
+            { phone: cleanPhone },
+            { phone: `+91${cleanPhone}` },
+            { phone: `91${cleanPhone}` },
+          ],
+        },
       });
       if (!existing) {
         throw new Error('No account found with this mobile number. Please register to get started.');
@@ -151,8 +163,14 @@ export class AuthService {
     }
 
     if (purpose === 'RESET_PASSWORD') {
-      const existing = await prisma.user.findUnique({
-        where: { phone: cleanPhone },
+      const existing = await prisma.user.findFirst({
+        where: {
+          OR: [
+            { phone: cleanPhone },
+            { phone: `+91${cleanPhone}` },
+            { phone: `91${cleanPhone}` },
+          ],
+        },
         include: { driverProfile: true },
       });
       if (!existing) {
@@ -258,8 +276,14 @@ export class AuthService {
     otpStore.delete(cleanPhone);
 
     // 4. Find or create user
-    let user = await prisma.user.findUnique({
-      where: { phone: cleanPhone },
+    let user = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { phone: cleanPhone },
+          { phone: `+91${cleanPhone}` },
+          { phone: `91${cleanPhone}` },
+        ],
+      },
       include: {
         customerProfile: true,
         driverProfile: true,
@@ -301,10 +325,20 @@ export class AuthService {
         },
       });
     } else {
+      const updates: any = {};
       if (name && name.trim().length > 0 && (user.name === 'New Driver' || user.name === 'New Customer')) {
+        updates.name = name.trim();
+      }
+      if (user.phone !== cleanPhone) {
+        updates.phone = cleanPhone;
+      }
+      if (role === 'DRIVER' && user.role !== 'DRIVER' && user.role !== 'ADMIN' && user.role !== 'SUPER_ADMIN') {
+        updates.role = 'DRIVER';
+      }
+      if (Object.keys(updates).length > 0) {
         await prisma.user.update({
           where: { id: user.id },
-          data: { name: name.trim() },
+          data: updates,
         });
       }
 

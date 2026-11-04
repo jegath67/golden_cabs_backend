@@ -1,6 +1,7 @@
 import { prisma } from '../../config/prisma';
 import { notificationsService } from '../notifications/notifications.service';
 import { unavailabilityService } from '../unavailability/unavailability.service';
+import { normalizePhone } from '../auth/auth.service';
 
 export class DriversService {
   async getDriverByUserId(userId: string) {
@@ -997,6 +998,107 @@ export class DriversService {
         ...r,
         driverCode: `DRV-${suffix}`,
       };
+    });
+  }
+
+  async createDriver(data: {
+    name: string;
+    phone: string;
+    email?: string;
+    personaType?: 'DRIVE_ONLY' | 'OWN_VEHICLE' | 'RENTAL';
+    licenseNumber?: string;
+    licenseExpiry?: string;
+    aadharNumber?: string;
+    panNumber?: string;
+    assignedHubId?: string;
+  }) {
+    const cleanPhone = normalizePhone(data.phone);
+    if (!cleanPhone || cleanPhone.length < 10) {
+      throw new Error('Valid 10-digit phone number is required');
+    }
+    if (!data.name || data.name.trim().length === 0) {
+      throw new Error('Name is required');
+    }
+
+    let user = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { phone: cleanPhone },
+          { phone: `+91${cleanPhone}` },
+          { phone: `91${cleanPhone}` },
+        ],
+      },
+      include: { driverProfile: true },
+    });
+
+    if (user) {
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          phone: cleanPhone,
+          name: data.name.trim(),
+          role: 'DRIVER',
+          isActive: true,
+          ...(data.email ? { email: data.email.trim().toLowerCase() } : {}),
+        },
+        include: { driverProfile: true },
+      });
+    } else {
+      user = await prisma.user.create({
+        data: {
+          phone: cleanPhone,
+          name: data.name.trim(),
+          email: data.email?.trim().toLowerCase() || null,
+          role: 'DRIVER',
+          isActive: true,
+        },
+        include: { driverProfile: true },
+      });
+    }
+
+    let profile = user.driverProfile;
+    const persona = data.personaType || 'DRIVE_ONLY';
+
+    if (!profile) {
+      profile = await prisma.driverProfile.create({
+        data: {
+          userId: user.id,
+          personaType: persona,
+          licenseNumber: data.licenseNumber,
+          licenseExpiry: data.licenseExpiry,
+          aadharNumber: data.aadharNumber,
+          panNumber: data.panNumber,
+          assignedHubId: data.assignedHubId,
+          approvalStatus: 'APPROVED',
+          wallet: {
+            create: { balance: 0 },
+          },
+        },
+      });
+    } else {
+      profile = await prisma.driverProfile.update({
+        where: { id: profile.id },
+        data: {
+          personaType: persona,
+          approvalStatus: 'APPROVED',
+          licenseNumber: data.licenseNumber || profile.licenseNumber,
+          licenseExpiry: data.licenseExpiry || profile.licenseExpiry,
+          aadharNumber: data.aadharNumber || profile.aadharNumber,
+          panNumber: data.panNumber || profile.panNumber,
+          assignedHubId: data.assignedHubId || profile.assignedHubId,
+        },
+      });
+    }
+
+    return prisma.driverProfile.findUnique({
+      where: { id: profile.id },
+      include: {
+        user: { select: { id: true, name: true, phone: true, email: true, isActive: true } },
+        assignedHub: true,
+        assignedVehicle: true,
+        ownedVehicles: true,
+        wallet: true,
+      },
     });
   }
 }

@@ -2,6 +2,8 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { vehiclesService } from './vehicles.service';
 import { prisma } from '../../config/prisma';
 import { schedulerService } from '../scheduler/scheduler.service';
+import { normalizePhone } from '../auth/auth.service';
+import { driversService } from '../drivers/drivers.service';
 
 export class VehiclesController {
   async getAllVehicles(req: FastifyRequest<any>, reply: FastifyReply) {
@@ -114,14 +116,57 @@ export class VehiclesController {
         if (driver) {
           ownerId = driver.id; // Enforce server-side ownership: do not trust client-supplied ownerId
         }
-      } else if ((user?.role === 'ADMIN' || user?.role === 'DISPATCHER') && body.ownerId) {
-        ownerId = body.ownerId;
+      } else if (user?.role === 'ADMIN' || user?.role === 'DISPATCHER' || (user as any)?.role === 'SUPER_ADMIN') {
+        if (body.ownerId) {
+          ownerId = body.ownerId;
+        } else if ((body as any).ownerPhone) {
+          const cleanPhone = normalizePhone((body as any).ownerPhone);
+          if (cleanPhone) {
+            const ownerUser = await prisma.user.findFirst({
+              where: {
+                OR: [
+                  { phone: cleanPhone },
+                  { phone: `+91${cleanPhone}` },
+                  { phone: `91${cleanPhone}` },
+                ],
+              },
+              include: { driverProfile: true },
+            });
+            if (ownerUser?.driverProfile) {
+              ownerId = ownerUser.driverProfile.id;
+            } else if (ownerUser) {
+              const newProfile = await prisma.driverProfile.create({
+                data: {
+                  userId: ownerUser.id,
+                  personaType: 'RENTAL',
+                  approvalStatus: 'APPROVED',
+                  wallet: { create: { balance: 0 } },
+                },
+              });
+              ownerId = newProfile.id;
+            } else if ((body as any).ownerName) {
+              const newOwner = await driversService.createDriver({
+                name: (body as any).ownerName,
+                phone: cleanPhone,
+                personaType: 'RENTAL',
+              });
+              ownerId = newOwner?.id;
+            }
+          }
+        }
       }
 
       const vehicle = await vehiclesService.createVehicle({
         ...body,
         ownerId,
       });
+
+      // If an assignedDriverId was provided by admin, assign it
+      const assignedDriverId = (body as any).assignedDriverId || (body as any).driverProfileId;
+      if (assignedDriverId && vehicle) {
+        await vehiclesService.assignVehicleToDriver(vehicle.id, assignedDriverId).catch(() => null);
+      }
+
       return reply.send({ success: true, message: 'Vehicle registered successfully', data: vehicle });
     } catch (error: any) {
       return reply.status(400).send({ success: false, message: error.message || 'Failed to create vehicle' });

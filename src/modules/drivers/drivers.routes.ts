@@ -59,6 +59,12 @@ export async function driversRoutes(app: FastifyInstance) {
   );
 
   // Admin routes
+  app.post(
+    '/',
+    { preHandler: [requireRoles(['ADMIN', 'DISPATCHER', 'SUPER_ADMIN'])] },
+    driversController.createDriver.bind(driversController)
+  );
+
   app.get(
     '/',
     { preHandler: [requireRoles(['ADMIN', 'DISPATCHER'])] },

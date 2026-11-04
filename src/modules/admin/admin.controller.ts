@@ -1405,6 +1405,7 @@ export class AdminController {
         include: {
           user: { select: { id: true, name: true, phone: true, isActive: true } },
           assignedVehicle: true,
+          assignedHub: true,
           rides: {
             where: {
               status: { in: ['ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] },
@@ -1432,6 +1433,7 @@ export class AdminController {
 
       const cityClusters: Record<string, { lat: number; lng: number }> = {
         chennai: { lat: 13.0827, lng: 80.2707 },
+        puducherry: { lat: 11.9416, lng: 79.8083 },
         coimbatore: { lat: 11.0168, lng: 76.9558 },
         madurai: { lat: 9.9252, lng: 78.1198 },
         trichy: { lat: 10.7905, lng: 78.7047 },
@@ -1453,11 +1455,29 @@ export class AdminController {
         let lat = d.currentLatitude;
         let lng = d.currentLongitude;
         if (!lat || !lng || (lat === 0 && lng === 0)) {
-          const base = cityClusters.chennai;
+          const base = (d.assignedHub?.latitude && d.assignedHub?.longitude)
+            ? { lat: d.assignedHub.latitude, lng: d.assignedHub.longitude }
+            : (d.assignedHub?.city?.toLowerCase() === 'puducherry' ? cityClusters.puducherry : cityClusters.chennai);
           const angle = (index * 137.5) * (Math.PI / 180);
-          const radius = 0.012 + (index % 5) * 0.008;
+          const radius = 0.008 + (index % 5) * 0.005;
           lat = base.lat + Math.sin(angle) * radius;
           lng = base.lng + Math.cos(angle) * radius;
+        }
+
+        let city = d.assignedHub?.city || '';
+        if (!city) {
+          let minDist = Infinity;
+          let nearestCity = 'Chennai';
+          for (const [cityName, cluster] of Object.entries(cityClusters)) {
+            const dLat = lat - cluster.lat;
+            const dLng = lng - cluster.lng;
+            const dist = dLat * dLat + dLng * dLng;
+            if (dist < minDist) {
+              minDist = dist;
+              nearestCity = cityName.charAt(0).toUpperCase() + cityName.slice(1);
+            }
+          }
+          city = nearestCity;
         }
 
         return {
@@ -1466,6 +1486,7 @@ export class AdminController {
           name: user?.name || 'Driver Partner',
           phone: user?.phone || '',
           photo: d.selfieImage || null,
+          city,
           isOnline: d.isOnline || d.shiftStatus === 'ON_SHIFT',
           isOnTrip,
           status: displayStatus,
