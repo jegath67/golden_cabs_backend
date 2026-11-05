@@ -532,33 +532,20 @@ export class DriversService {
       speed?: number;
       accuracy?: number;
       rideId?: string;
+      clientTimestamp?: number;
+      timestamp?: number;
     }
   ) {
-    const driver = await prisma.driverProfile.findUnique({
-      where: { userId },
-    });
-    if (!driver) {
-      throw new Error('Driver profile not found');
-    }
+    // P2 Optimization: Multi-tier cached resolution of driverProfile.id from userId
+    const driverId = await locationCacheService.getDriverIdForUser(userId);
 
+    // P2 Optimization: Multi-tier cached validation of active ride ownership and status
     if (data.rideId) {
-      const ride = await prisma.ride.findUnique({
-        where: { id: data.rideId },
-      });
-      if (!ride) {
-        throw new Error('Ride not found');
-      }
-      if (ride.driverId !== driver.id) {
-        throw new Error('Unauthorized: You are not the assigned driver for this ride');
-      }
-      const activeStatuses = ['ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'];
-      if (!activeStatuses.includes(ride.status)) {
-        throw new Error(`Cannot update ride location for inactive ride status: ${ride.status}`);
-      }
+      await locationCacheService.validateActiveRide(data.rideId, driverId);
     }
 
     // Save to Redis / In-Memory cache and schedule periodic batch dump to PostgreSQL
-    const cached = await locationCacheService.saveDriverLocation(driver.id, {
+    const cached = await locationCacheService.saveDriverLocation(driverId, {
       userId,
       latitude: data.latitude,
       longitude: data.longitude,
@@ -566,10 +553,11 @@ export class DriversService {
       speed: data.speed,
       accuracy: data.accuracy,
       rideId: data.rideId,
+      clientTimestamp: data.clientTimestamp ?? data.timestamp,
     });
 
     return {
-      id: driver.id,
+      id: driverId,
       currentLatitude: cached.latitude,
       currentLongitude: cached.longitude,
       updatedAt: new Date(cached.updatedAt),

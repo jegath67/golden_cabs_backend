@@ -517,6 +517,8 @@ export class RidesService {
         },
       }).catch((e) => console.error(e));
     } else if (status === 'CANCELLED') {
+      // Invalidate active ride location cache immediately
+      locationCacheService.invalidateRideValidation(ride.id).catch(() => {});
       const recipientId = actorRole === 'DRIVER' ? ride.customerId : updated.driver?.userId;
       if (recipientId) {
         notificationsService.sendToUser({
@@ -768,6 +770,9 @@ export class RidesService {
     if (updatedRide.driverId) {
       locationCacheService.flushDriverImmediately(updatedRide.driverId).catch(() => {});
     }
+
+    // Invalidate active ride location cache immediately
+    locationCacheService.invalidateRideValidation(updatedRide.id).catch(() => {});
 
     // Send notifications to Customer and Driver
     notificationsService.sendToUser({

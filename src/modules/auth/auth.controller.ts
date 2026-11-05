@@ -1,5 +1,6 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { authService } from './auth.service';
+import { formatAdminCode } from '../admin/admin.controller';
 
 export class AuthController {
   async sendOtp(req: FastifyRequest<any>, reply: FastifyReply) {
@@ -87,12 +88,18 @@ export class AuthController {
         role: user.role,
       });
 
+      const isAdminRole = ['ADMIN', 'SUPER_ADMIN', 'ZONE_ADMIN', 'DISPATCHER'].includes(user.role);
+      const userWithCode = {
+        ...user,
+        ...(isAdminRole ? { adminCode: formatAdminCode(user.id), displayId: formatAdminCode(user.id) } : {}),
+      };
+
       return reply.send({
         success: true,
         message: 'Admin login successful',
         data: {
           token,
-          user,
+          user: userWithCode,
         },
       });
     } catch (error: any) {
@@ -182,9 +189,15 @@ export class AuthController {
         });
       }
 
+      const isAdminRole = ['ADMIN', 'SUPER_ADMIN', 'ZONE_ADMIN', 'DISPATCHER'].includes(user.role);
+      const userWithCode = {
+        ...user,
+        ...(isAdminRole ? { adminCode: formatAdminCode(user.id), displayId: formatAdminCode(user.id) } : {}),
+      };
+
       return reply.send({
         success: true,
-        data: user,
+        data: userWithCode,
       });
     } catch (error) {
       return reply.status(500).send({

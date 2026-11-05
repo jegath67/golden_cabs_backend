@@ -19,6 +19,13 @@ function formatCustomerCode(userId?: string | null): string {
   return `CUST-${suffix}`;
 }
 
+export function formatAdminCode(adminId?: string | null): string {
+  if (!adminId) return 'ADM-00001';
+  const clean = String(adminId).replace(/^(GC-)?ADM-/i, '').replace(/-/g, '').toUpperCase();
+  const suffix = clean.length >= 5 ? clean.substring(0, 5) : clean.padStart(4, '0');
+  return `ADM-${suffix}`;
+}
+
 function formatRideResponse(r: any) {
   const meta = (r.stops as any) || {};
   const isScheduled = !!meta.isScheduled && !!meta.scheduledAt;
@@ -827,7 +834,12 @@ export class AdminController {
         },
         orderBy: { createdAt: 'desc' },
       });
-      return reply.send({ success: true, data: admins });
+      const formatted = admins.map((admin) => ({
+        ...admin,
+        adminCode: formatAdminCode(admin.id),
+        displayId: formatAdminCode(admin.id),
+      }));
+      return reply.send({ success: true, data: formatted });
     } catch (error: any) {
       return reply.status(500).send({ success: false, message: 'Failed to fetch sub-admins', error: error.message });
     }
@@ -875,7 +887,15 @@ export class AdminController {
         },
       });
 
-      return reply.status(201).send({ success: true, message: 'Admin account created successfully', data: created });
+      return reply.status(201).send({
+        success: true,
+        message: 'Admin account created successfully',
+        data: {
+          ...created,
+          adminCode: formatAdminCode(created.id),
+          displayId: formatAdminCode(created.id),
+        },
+      });
     } catch (error: any) {
       return reply.status(400).send({ success: false, message: error.message || 'Failed to create sub-admin' });
     }
@@ -909,7 +929,15 @@ export class AdminController {
         },
       });
 
-      return reply.send({ success: true, message: 'Admin account updated successfully', data: updated });
+      return reply.send({
+        success: true,
+        message: 'Admin account updated successfully',
+        data: {
+          ...updated,
+          adminCode: formatAdminCode(updated.id),
+          displayId: formatAdminCode(updated.id),
+        },
+      });
     } catch (error: any) {
       return reply.status(400).send({ success: false, message: error.message || 'Failed to update sub-admin' });
     }
@@ -1441,7 +1469,14 @@ export class AdminController {
         salem: { lat: 11.6643, lng: 78.1460 },
       };
 
-      const cachedLocations = locationCacheService.getAllCachedLocations();
+      const cachedDriverIds = new Set<string>(drivers.map((d) => d.id));
+      for (const r of activeRides) {
+        if (r.driverId) cachedDriverIds.add(r.driverId);
+      }
+      const cachedLocations = await locationCacheService.getLocationsForDrivers(Array.from(cachedDriverIds));
+
+      const STALE_LOCATION_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
+      const now = Date.now();
 
       const mappedDrivers = drivers.map((d, index) => {
         const user = d.user;
@@ -1456,8 +1491,38 @@ export class AdminController {
         }
 
         const cached = cachedLocations.get(d.id);
-        let lat = cached ? cached.latitude : d.currentLatitude;
-        let lng = cached ? cached.longitude : d.currentLongitude;
+        let lat: number | null | undefined;
+        let lng: number | null | undefined;
+        let locationUpdatedAt = d.updatedAt ? d.updatedAt.toISOString() : new Date().toISOString();
+
+        if (isOnTrip) {
+          // Rule 1: Active ride tracking is always prioritized
+          if (cached) {
+            lat = cached.latitude;
+            lng = cached.longitude;
+            locationUpdatedAt = new Date(cached.updatedAt).toISOString();
+          } else {
+            lat = d.currentLatitude;
+            lng = d.currentLongitude;
+          }
+        } else if (d.isOnline || d.shiftStatus === 'ON_SHIFT') {
+          // Rule 2: Online / available driver -> apply stale filter (max 5 minutes)
+          const isFresh = cached && (now - cached.updatedAt <= STALE_LOCATION_THRESHOLD_MS);
+          if (isFresh && cached) {
+            lat = cached.latitude;
+            lng = cached.longitude;
+            locationUpdatedAt = new Date(cached.updatedAt).toISOString();
+          } else {
+            // Stale or no cache -> fall back to authoritative DB coordinates
+            lat = d.currentLatitude;
+            lng = d.currentLongitude;
+          }
+        } else {
+          // Rule 3: Offline / inactive driver -> do not show stale moving cache, fall back to DB
+          lat = d.currentLatitude;
+          lng = d.currentLongitude;
+        }
+
         if (!lat || !lng || (lat === 0 && lng === 0)) {
           const base = (d.assignedHub?.latitude && d.assignedHub?.longitude)
             ? { lat: d.assignedHub.latitude, lng: d.assignedHub.longitude }
@@ -1497,7 +1562,7 @@ export class AdminController {
           shiftStatus: d.shiftStatus,
           latitude: lat,
           longitude: lng,
-          updatedAt: d.updatedAt.toISOString(),
+          updatedAt: locationUpdatedAt,
           vehicleModel: d.assignedVehicle?.model || 'Sedan',
           vehicleNumber: d.assignedVehicle?.vehicleNumber || 'TN-01-REG',
           vehicleType: d.assignedVehicle?.vehicleType || 'Sedan',
@@ -1523,6 +1588,7 @@ export class AdminController {
       const mappedRides = activeRides.map((r) => {
         const meta = (r.stops as any) || {};
         const fare = r.finalFare || r.fareBreakdown?.totalFare || r.estimatedFare || 0;
+        const cachedDriverLoc = r.driverId ? cachedLocations.get(r.driverId) : undefined;
         return {
           id: r.id,
           bookingId: r.bookingCode || r.id,
@@ -1531,8 +1597,8 @@ export class AdminController {
           driverName: r.driver?.user?.name || 'Unassigned',
           driverPhone: r.driver?.user?.phone || '',
           driverId: r.driverId ? formatDriverCode(r.driverId) : null,
-          driverLat: r.driver?.currentLatitude || null,
-          driverLng: r.driver?.currentLongitude || null,
+          driverLat: cachedDriverLoc ? cachedDriverLoc.latitude : (r.driver?.currentLatitude || null),
+          driverLng: cachedDriverLoc ? cachedDriverLoc.longitude : (r.driver?.currentLongitude || null),
           amount: `₹${Math.round(fare)}`,
           rawAmount: fare,
           pickupLocation: r.pickupAddress || r.pickupLocation,

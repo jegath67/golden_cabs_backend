@@ -191,7 +191,10 @@ signals.forEach((signal) => {
   process.on(signal, async () => {
     console.log(`\nReceived ${signal}. Gracefully shutting down...`);
     try {
-      await locationCacheService.destroy();
+      const shutdownRes = await locationCacheService.destroy(10000);
+      if (!shutdownRes.success) {
+        console.warn(`[Shutdown] Completed with ${shutdownRes.unflushedCount} unflushed location records.`);
+      }
       await disconnectRedis();
       await app.close();
       console.log('Server and location cache shut down cleanly.');

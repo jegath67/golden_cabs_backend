@@ -50,13 +50,15 @@ export class DriversController {
   }
 
   async updateLocation(req: FastifyRequest<any>, reply: FastifyReply) {
-    const { latitude, longitude, heading, speed, accuracy, rideId } = (req.body as {
+    const { latitude, longitude, heading, speed, accuracy, rideId, timestamp, clientTimestamp } = (req.body as {
       latitude?: number;
       longitude?: number;
       heading?: number;
       speed?: number;
       accuracy?: number;
       rideId?: string;
+      timestamp?: number;
+      clientTimestamp?: number;
     }) || {};
 
     if (latitude === undefined || typeof latitude !== 'number' || !Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
@@ -103,6 +105,7 @@ export class DriversController {
 
     try {
       const user = req.user as { id: string };
+      const rawTs = typeof clientTimestamp === 'number' ? clientTimestamp : (typeof timestamp === 'number' ? timestamp : undefined);
       const updated = await driversService.updateLocation(user.id, {
         latitude,
         longitude,
@@ -110,6 +113,7 @@ export class DriversController {
         speed,
         accuracy,
         rideId,
+        clientTimestamp: rawTs,
       });
 
       return reply.send({
