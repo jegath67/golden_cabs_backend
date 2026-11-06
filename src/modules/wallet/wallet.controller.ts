@@ -79,6 +79,31 @@ export class WalletController {
       return reply.status(400).send({ success: false, message: error.message || 'Failed to submit cashout' });
     }
   }
+
+  async getCustomerWallet(req: FastifyRequest<any>, reply: FastifyReply) {
+    const user = req.user as { id: string };
+    try {
+      const wallet = await walletService.getCustomerWallet(user.id);
+      return reply.send({ success: true, data: wallet });
+    } catch (error: any) {
+      return reply.status(400).send({ success: false, message: error.message || 'Failed to fetch customer wallet' });
+    }
+  }
+
+  async getCustomerTransactions(req: FastifyRequest<any>, reply: FastifyReply) {
+    const user = req.user as { id: string };
+    const { page, limit } = (req.query as any) || {};
+    try {
+      const result = await walletService.getCustomerTransactions(
+        user.id,
+        page ? Number(page) : 1,
+        limit ? Number(limit) : 20
+      );
+      return reply.send({ success: true, data: result });
+    } catch (error: any) {
+      return reply.status(400).send({ success: false, message: error.message || 'Failed to fetch customer transactions' });
+    }
+  }
 }
 
 export const walletController = new WalletController();

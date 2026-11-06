@@ -5,8 +5,20 @@ import { requireRoles } from '../../middlewares/auth.middleware';
 export async function walletRoutes(app: FastifyInstance) {
   app.get(
     '/me',
-    { preHandler: [requireRoles(['DRIVER'])] },
+    { preHandler: [requireRoles(['DRIVER', 'CUSTOMER'])] },
     walletController.getMyWallet.bind(walletController)
+  );
+
+  app.get(
+    '/customer',
+    { preHandler: [requireRoles(['CUSTOMER'])] },
+    walletController.getCustomerWallet.bind(walletController)
+  );
+
+  app.get(
+    '/customer/transactions',
+    { preHandler: [requireRoles(['CUSTOMER'])] },
+    walletController.getCustomerTransactions.bind(walletController)
   );
 
   app.get(

@@ -239,108 +239,160 @@ export class RefundsService {
       throw new Error('Admin remarks are mandatory when rejecting a refund request.');
     }
 
-    // If moving to REFUNDED, verify payment method settlement safety
+    // If moving to REFUNDED, settle either via CustomerWallet or Manual Bank Reversal
     if (newStatus === 'REFUNDED') {
       const paymentMethod = refund.ride.paymentMethod;
 
-      // In the current architecture:
-      // - Customer in-app wallet refund can be settled atomically.
-      // - External Payment Gateways (Razorpay/Stripe/UPI intents) are not yet integrated.
-      // We do not fake gateway settlement.
-      if (paymentMethod !== 'WALLET') {
-        const err: any = new Error(
-          `Automated gateway refund for payment method '${paymentMethod}' is not configured. Manual banking reversal or payment gateway integration required before finalizing settlement.`
-        );
-        err.statusCode = 422;
-        throw err;
-      }
+      if (paymentMethod === 'WALLET') {
+        // Settle wallet refund atomically using conditional status claim and customer ledger entry
+        return prisma.$transaction(async (tx) => {
+          // Atomic Pessimistic Claim: UPDATE WHERE id = $1 AND status = 'APPROVED'
+          // Acquires exclusive row lock. If another concurrent request claimed it, 0 rows returned
+          const claimed = await tx.$queryRaw<any[]>`
+            UPDATE "RefundRequest"
+            SET "status" = 'REFUNDED'::"RefundStatus",
+                "adminRemarks" = ${adminRemarks ?? refund.adminRemarks},
+                "updatedAt" = NOW()
+            WHERE "id" = ${refundId}
+              AND "status" = 'APPROVED'::"RefundStatus"
+            RETURNING "id", "amount", "customerId", "rideId";
+          `;
 
-      // Settle wallet refund atomically using conditional status claim and customer ledger entry
-      return prisma.$transaction(async (tx) => {
-        // Atomic Pessimistic Claim: UPDATE WHERE id = $1 AND status = 'APPROVED'
-        // Acquires exclusive row lock. If another concurrent request claimed it, 0 rows returned
-        const claimed = await tx.$queryRaw<any[]>`
-          UPDATE "RefundRequest"
-          SET "status" = 'REFUNDED'::"RefundStatus",
-              "adminRemarks" = ${adminRemarks ?? refund.adminRemarks},
-              "updatedAt" = NOW()
-          WHERE "id" = ${refundId}
-            AND "status" = 'APPROVED'::"RefundStatus"
-          RETURNING "id", "amount", "customerId", "rideId";
-        `;
+          if (!claimed || (Array.isArray(claimed) && claimed.length === 0)) {
+            const err: any = new Error(
+              `Refund settlement rejected: Request ${refundId} is either already settled or not in APPROVED state.`
+            );
+            err.statusCode = 409;
+            throw err;
+          }
 
-        if (!claimed || (Array.isArray(claimed) && claimed.length === 0)) {
-          const err: any = new Error(
-            `Refund settlement rejected: Request ${refundId} is either already settled or not in APPROVED state.`
-          );
-          err.statusCode = 409;
-          throw err;
-        }
+          const claimedRefund = claimed[0];
+          const refundAmount = Math.round(Number(claimedRefund.amount) * 100) / 100;
 
-        const claimedRefund = claimed[0];
-        const refundAmount = Math.round(Number(claimedRefund.amount) * 100) / 100;
+          // Upsert customer wallet balance
+          const customerWallet = await tx.customerWallet.upsert({
+            where: { customerId: claimedRefund.customerId },
+            create: {
+              customerId: claimedRefund.customerId,
+              balance: refundAmount,
+            },
+            update: {
+              balance: { increment: refundAmount },
+            },
+          });
 
-        // Upsert customer wallet balance
-        const customerWallet = await tx.customerWallet.upsert({
-          where: { customerId: claimedRefund.customerId },
-          create: {
-            customerId: claimedRefund.customerId,
-            balance: refundAmount,
-          },
-          update: {
-            balance: { increment: refundAmount },
-          },
-        });
+          // Insert ledger entry with UNIQUE referenceRefundId (Idempotency Key)
+          await tx.customerWalletTransaction.create({
+            data: {
+              walletId: customerWallet.id,
+              amount: refundAmount,
+              type: 'REFUND',
+              status: 'COMPLETED',
+              description: `Refund for trip ${refund.ride.bookingCode} - Reason: ${refund.reason}`,
+              referenceRefundId: refundId,
+              referenceRideId: claimedRefund.rideId,
+            },
+          });
 
-        // Insert ledger entry with UNIQUE referenceRefundId (Idempotency Key)
-        await tx.customerWalletTransaction.create({
-          data: {
-            walletId: customerWallet.id,
-            amount: refundAmount,
-            type: 'REFUND',
-            status: 'COMPLETED',
-            description: `Refund for trip ${refund.ride.bookingCode} - Reason: ${refund.reason}`,
-            referenceRefundId: refundId,
-            referenceRideId: claimedRefund.rideId,
-          },
-        });
+          // Update ride payment status to REFUNDED
+          await tx.ride.update({
+            where: { id: claimedRefund.rideId },
+            data: {
+              paymentStatus: 'REFUNDED',
+            },
+          });
 
-        // Update ride payment status to REFUNDED
-        await tx.ride.update({
-          where: { id: claimedRefund.rideId },
-          data: {
-            paymentStatus: 'REFUNDED',
-          },
-        });
-
-        // Re-fetch complete refund record
-        const updated = await tx.refundRequest.findUniqueOrThrow({
-          where: { id: refundId },
-          include: {
-            ride: {
-              select: {
-                id: true,
-                bookingCode: true,
-                pickupLocation: true,
-                dropLocation: true,
-                paymentMethod: true,
-                paymentStatus: true,
+          // Re-fetch complete refund record
+          const updated = await tx.refundRequest.findUniqueOrThrow({
+            where: { id: refundId },
+            include: {
+              ride: {
+                select: {
+                  id: true,
+                  bookingCode: true,
+                  pickupLocation: true,
+                  dropLocation: true,
+                  paymentMethod: true,
+                  paymentStatus: true,
+                },
               },
             },
-          },
+          });
+
+          // Notify customer
+          notificationsService.sendToUser({
+            userId: claimedRefund.customerId,
+            title: '✅ Refund Settled',
+            message: `₹${refundAmount} has been credited to your Golden Cabs wallet.`,
+            type: 'refund_completed',
+            data: { refundId, rideId: claimedRefund.rideId },
+          }).catch((e) => console.error(e));
+
+          return updated;
         });
+      } else {
+        // Manual banking reversal (UPI / Card / Cash)
+        const finalRemarks = adminRemarks?.trim() || 'Manual Settlement confirmed by Admin';
 
-        // Notify customer
-        notificationsService.sendToUser({
-          userId: claimedRefund.customerId,
-          title: '✅ Refund Settled',
-          message: `₹${refundAmount} has been credited to your Golden Cabs wallet.`,
-          type: 'refund_completed',
-          data: { refundId, rideId: claimedRefund.rideId },
-        }).catch((e) => console.error(e));
+        return prisma.$transaction(async (tx) => {
+          const claimed = await tx.$queryRaw<any[]>`
+            UPDATE "RefundRequest"
+            SET "status" = 'REFUNDED'::"RefundStatus",
+                "adminRemarks" = ${finalRemarks},
+                "updatedAt" = NOW()
+            WHERE "id" = ${refundId}
+              AND "status" = 'APPROVED'::"RefundStatus"
+            RETURNING "id", "amount", "customerId", "rideId";
+          `;
 
-        return updated;
-      });
+          if (!claimed || (Array.isArray(claimed) && claimed.length === 0)) {
+            const err: any = new Error(
+              `Refund settlement rejected: Request ${refundId} is either already settled or not in APPROVED state.`
+            );
+            err.statusCode = 409;
+            throw err;
+          }
+
+          const claimedRefund = claimed[0];
+          const refundAmount = Math.round(Number(claimedRefund.amount) * 100) / 100;
+
+          // Update ride payment status to REFUNDED
+          await tx.ride.update({
+            where: { id: claimedRefund.rideId },
+            data: {
+              paymentStatus: 'REFUNDED',
+            },
+          });
+
+          // Re-fetch complete refund record
+          const updated = await tx.refundRequest.findUniqueOrThrow({
+            where: { id: refundId },
+            include: {
+              ride: {
+                select: {
+                  id: true,
+                  bookingCode: true,
+                  pickupLocation: true,
+                  dropLocation: true,
+                  paymentMethod: true,
+                  paymentStatus: true,
+                },
+              },
+            },
+          });
+
+          // Notify customer
+          notificationsService.sendToUser({
+            userId: claimedRefund.customerId,
+            title: '✅ Refund Completed',
+            message: `₹${refundAmount} has been refunded to your original payment method.`,
+            type: 'refund_completed',
+            data: { refundId, rideId: claimedRefund.rideId },
+          }).catch((e) => console.error(e));
+
+          return updated;
+        });
+      }
     }
 
     // Update status for non-terminal settlement transitions (UNDER_REVIEW, APPROVED, REJECTED)

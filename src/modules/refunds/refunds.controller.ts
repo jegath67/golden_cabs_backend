@@ -96,7 +96,7 @@ export class RefundsController {
 
   async updateRefundStatus(req: FastifyRequest<any>, reply: FastifyReply) {
     const { id } = req.params as { id: string };
-    const { status, adminRemarks } = (req.body as any) || {};
+    const { status, adminRemarks, adminNotes, refundUtr, utr } = (req.body as any) || {};
 
     if (!status) {
       return reply.status(400).send({
@@ -105,11 +105,13 @@ export class RefundsController {
       });
     }
 
+    const remarks = adminRemarks || adminNotes || (refundUtr || utr ? `UTR: ${refundUtr || utr}` : undefined);
+
     try {
       const updated = await refundsService.updateRefundStatus(
         id,
         status as RefundStatusType,
-        adminRemarks
+        remarks
       );
 
       return reply.send({

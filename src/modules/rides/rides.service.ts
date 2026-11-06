@@ -308,6 +308,22 @@ export class RidesService {
       },
     }).catch((e) => console.error('Customer ride creation notification error:', e));
 
+    // Send notification to all admin users so it appears in Admin Notification Screen & Push
+    notificationsService.sendToAdmins({
+      title: isScheduledBooking ? '📅 New Scheduled Booking Request' : '🚖 New Ride Booking Request',
+      message: `Booking #${bookingCode}: ${data.pickupLocation} ➔ ${data.dropLocation} (${data.requestedVehicle || data.carName || 'Cab'}) - ₹${finalEstimatedFare.toFixed(0)}`,
+      type: 'ride_created',
+      data: {
+        rideId: ride.id,
+        bookingCode,
+        customerId,
+        pickupLocation: data.pickupLocation,
+        dropLocation: data.dropLocation,
+        totalFare: String(finalEstimatedFare),
+        isScheduled: String(isScheduledBooking),
+      },
+    }).catch((e) => console.error('Admin ride creation notification error:', e));
+
     return {
       ...ride,
       tripType: finalTripType,
@@ -529,6 +545,13 @@ export class RidesService {
           data: { rideId },
         }).catch((e) => console.error(e));
       }
+      // Also notify admins
+      notificationsService.sendToAdmins({
+        title: '❌ Ride Booking Cancelled',
+        message: `Booking #${ride.bookingCode || ride.id.slice(-6)} was cancelled by ${actorRole.toLowerCase()}.${cancelReason ? ` Reason: ${cancelReason}` : ''}`,
+        type: 'ride_cancelled',
+        data: { rideId: ride.id, bookingCode: ride.bookingCode || '', cancelledBy: actorRole },
+      }).catch((e) => console.error('Admin ride cancellation notification error:', e));
     }
 
     return updated;
@@ -616,11 +639,18 @@ export class RidesService {
   }
 
   /**
-   * Complete ride, calculate final fare, and credit driver wallet atomically.
+   * Complete ride, calculate final fare, and settle driver wallet atomically.
    * Payout Policy: Platform absorbs customer coupon discounts.
-   * Driver receives 80% commission based on the Gross Trip Fare.
+   * - CASH rides: Driver collects cash in hand from customer -> paymentStatus becomes PAID,
+   *   and company commission is debited from driver wallet (can become negative dues).
+   * - ONLINE rides:
+   *     - If paymentStatus is already verified as PAID: driver wallet is credited with net earnings.
+   *     - If paymentStatus is PENDING: ride completes, but paymentStatus REMAINS PENDING!
+   *       Driver wallet is NEVER credited for uncollected funds.
+   * - Switch to Cash: If customer original method was UPI/CARD but customer pays cash directly,
+   *   switchToCash=true transitions method to CASH, marks PAID, and applies cash commission settlement.
    */
-  async completeRide(rideId: string) {
+  async completeRide(rideId: string, options?: { switchToCash?: boolean }) {
     const updatedRide = await prisma.$transaction(async (tx) => {
       const cleanRideId = String(rideId).trim();
       const ride = await tx.ride.findFirst({
@@ -649,13 +679,28 @@ export class RidesService {
       const finalFare = customerPayable;
       const completedAt = new Date();
 
+      // Handle Switch to Cash option
+      let effectivePaymentMethod = ride.paymentMethod;
+      if (options?.switchToCash && effectivePaymentMethod !== 'CASH') {
+        effectivePaymentMethod = 'CASH';
+      }
+
+      const isCash = effectivePaymentMethod === 'CASH';
+      const isAlreadyPaid = ride.paymentStatus === 'PAID';
+
+      // Financial Correctness Guard:
+      // CASH: Driver collects cash in person at drop-off -> marks PAID
+      // ONLINE: If verified as PAID beforehand -> remains PAID; if PENDING -> strictly remains PENDING!
+      const finalPaymentStatus = isCash ? 'PAID' : (isAlreadyPaid ? 'PAID' : 'PENDING');
+
       const updated = await tx.ride.update({
         where: { id: ride.id },
         data: {
           status: 'COMPLETED',
           finalFare,
           completedAt,
-          paymentStatus: 'PAID',
+          paymentMethod: effectivePaymentMethod,
+          paymentStatus: finalPaymentStatus,
         },
         include: {
           customer: true,
@@ -689,7 +734,6 @@ export class RidesService {
         });
 
         if (!existingTx) {
-          const isCash = ride.paymentMethod === 'CASH';
           const commissionRate = await platformSettingsService.getCommissionRate();
           const companyCommission = Math.round(grossTripFare * commissionRate * 100) / 100;
           const driverNetEarnings = Math.round((grossTripFare - companyCommission) * 100) / 100;
@@ -721,8 +765,8 @@ export class RidesService {
                 referenceRideId: ride.id,
               },
             });
-          } else {
-            // Customer UPI / Online Payment:
+          } else if (isAlreadyPaid) {
+            // Customer UPI / Online Payment (Confirmed):
             // Company receives full online payment.
             // Driver net earnings credited to wallet balance (automatically offsetting any negative dues).
             const newBalance = Math.round((currentBalance + driverNetEarnings) * 100) / 100;
@@ -746,6 +790,13 @@ export class RidesService {
                 referenceRideId: ride.id,
               },
             });
+          } else {
+            // Unpaid Online Ride:
+            // Ride is completed, but customer has NOT paid online yet.
+            // DO NOT credit driver wallet with unreceived funds.
+            console.log(
+              `[RideService] Ride ${ride.bookingCode} completed with pending online payment (Method: ${ride.paymentMethod}). Driver wallet not credited until payment verification.`
+            );
           }
         }
       }
@@ -786,6 +837,7 @@ export class RidesService {
     if (updatedRide.driver?.userId) {
       const grossFare = (updatedRide.fareBreakdown?.totalFare || 0) + (updatedRide.fareBreakdown?.discountAmount || 0);
       const isCash = updatedRide.paymentMethod === 'CASH';
+      const isPaid = updatedRide.paymentStatus === 'PAID';
       const commissionRate = await platformSettingsService.getCommissionRate();
       const commission = Math.round(grossFare * commissionRate * 100) / 100;
       const driverPay = Math.round((grossFare - commission) * 100) / 100;
@@ -798,13 +850,21 @@ export class RidesService {
           type: 'wallet_debited',
           data: { rideId: updatedRide.id, commission: String(commission) },
         }).catch((e) => console.error(e));
-      } else {
+      } else if (isPaid) {
         notificationsService.sendToUser({
           userId: updatedRide.driver.userId,
           title: '💰 Trip Earnings Credited!',
           message: `₹${driverPay} has been added to your wallet for trip ${updatedRide.bookingCode}.`,
           type: 'wallet_credited',
           data: { rideId: updatedRide.id, amount: String(driverPay) },
+        }).catch((e) => console.error(e));
+      } else {
+        notificationsService.sendToUser({
+          userId: updatedRide.driver.userId,
+          title: '⏳ Trip Completed (Payment Pending)',
+          message: `Trip ${updatedRide.bookingCode} completed. Online payment of ₹${updatedRide.finalFare} is pending customer confirmation.`,
+          type: 'trip_completed',
+          data: { rideId: updatedRide.id, amount: String(updatedRide.finalFare), paymentStatus: 'PENDING' },
         }).catch((e) => console.error(e));
       }
     }

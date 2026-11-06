@@ -341,6 +341,32 @@ export class WalletService {
 
     return wallet;
   }
+
+  async getCustomerTransactions(userId: string, page = 1, limit = 20) {
+    const wallet = await this.getCustomerWallet(userId);
+    const skip = (page - 1) * limit;
+
+    const [transactions, total] = await Promise.all([
+      prisma.customerWalletTransaction.findMany({
+        where: { walletId: wallet.id },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      prisma.customerWalletTransaction.count({
+        where: { walletId: wallet.id },
+      }),
+    ]);
+
+    return {
+      walletId: wallet.id,
+      balance: wallet.balance,
+      transactions,
+      total,
+      page,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
 }
 
 export const walletService = new WalletService();

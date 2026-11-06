@@ -86,9 +86,10 @@ export class RidesController {
 
   async completeRide(req: FastifyRequest<any>, reply: FastifyReply) {
     const { id } = req.params as { id: string };
+    const { switchToCash } = (req.body as any) || {};
 
     try {
-      const completed = await ridesService.completeRide(id);
+      const completed = await ridesService.completeRide(id, { switchToCash: Boolean(switchToCash) });
       return reply.send({ success: true, message: 'Ride completed successfully', data: completed });
     } catch (error: any) {
       return reply.status(400).send({ success: false, message: error.message || 'Failed to complete ride' });

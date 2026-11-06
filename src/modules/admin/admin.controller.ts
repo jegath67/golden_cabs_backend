@@ -1349,10 +1349,52 @@ export class AdminController {
 
   async getPayments(req: FastifyRequest, reply: FastifyReply) {
     try {
+      const query = (req.query as any) || {};
+      const { paymentMethod, status, startDate, endDate, search } = query;
+
+      const where: any = {};
+
+      if (paymentMethod && paymentMethod !== 'All' && paymentMethod !== 'All Payment Types') {
+        where.paymentMethod = paymentMethod.toUpperCase();
+      }
+
+      if (status && status !== 'All') {
+        const s = status.toUpperCase();
+        if (s === 'PAID' || s === 'COMPLETED') {
+          where.paymentStatus = 'PAID';
+        } else if (s === 'PENDING') {
+          where.paymentStatus = 'PENDING';
+          where.status = { not: 'CANCELLED' };
+        } else if (s === 'CANCELLED') {
+          where.status = 'CANCELLED';
+        } else if (s === 'REFUNDED') {
+          where.paymentStatus = 'REFUNDED';
+        }
+      }
+
+      if (startDate || endDate) {
+        where.createdAt = {};
+        if (startDate) {
+          where.createdAt.gte = new Date(startDate);
+        }
+        if (endDate) {
+          where.createdAt.lte = new Date(endDate);
+        }
+      }
+
+      if (search && search.trim()) {
+        const s = search.trim();
+        where.OR = [
+          { bookingCode: { contains: s, mode: 'insensitive' } },
+          { customer: { name: { contains: s, mode: 'insensitive' } } },
+          { customer: { phone: { contains: s, mode: 'insensitive' } } },
+          { driver: { user: { name: { contains: s, mode: 'insensitive' } } } },
+          { driver: { user: { phone: { contains: s, mode: 'insensitive' } } } },
+        ];
+      }
+
       const rides = await prisma.ride.findMany({
-        where: {
-          status: { in: ['COMPLETED', 'ONGOING', 'ACCEPTED', 'ARRIVED'] },
-        },
+        where,
         include: {
           customer: true,
           driver: { include: { user: true } },
@@ -1364,11 +1406,14 @@ export class AdminController {
       const payments = rides.map((r) => {
         const meta = (r.stops as any) || {};
         const fare = r.finalFare || r.fareBreakdown?.totalFare || r.estimatedFare || 0.0;
-        const isPaid = r.paymentStatus === 'PAID' || r.status === 'COMPLETED';
+        // Strictly check paymentStatus === 'PAID'
+        const isPaid = r.paymentStatus === 'PAID';
 
         return {
           orderId: r.bookingCode || `GC-${r.id.substring(0, 5).toUpperCase()}`,
-          paymentId: r.fareBreakdown?.id ? `TXN${r.fareBreakdown.id.substring(0, 6).toUpperCase()}` : `TXN${r.id.substring(0, 6).toUpperCase()}`,
+          // Internal reference - not pretending to be a gateway transaction ID
+          paymentId: r.bookingCode ? `REF-${r.bookingCode}` : `REF-${r.id.substring(0, 8).toUpperCase()}`,
+          rideId: r.id,
           userName: r.customer?.name || 'Customer',
           customerPhone: r.customer?.phone || '',
           driverName: r.driver?.user?.name || 'Driver Partner',
@@ -1379,10 +1424,12 @@ export class AdminController {
             distanceKm: r.distanceKm,
           }),
           amount: fare,
-          paymentMode: r.paymentMethod || 'UPI',
+          paymentMode: r.paymentMethod || 'CASH',
+          paymentStatus: r.paymentStatus,
+          rideStatus: r.status,
           status: isPaid,
           timestamp: r.createdAt.toISOString(),
-          zone: meta.zone || 'Chennai',
+          zone: meta.zone || 'Puducherry',
           pickupLocation: r.pickupAddress || r.pickupLocation || '',
           dropLocation: r.dropAddress || r.dropLocation || '',
           stops: meta.additionalStops || [],
@@ -1392,7 +1439,8 @@ export class AdminController {
       const totalRevenue = payments.reduce((acc, p) => acc + (p.status ? p.amount : 0), 0);
       const totalTransactions = payments.length;
       const completedCount = payments.filter((p) => p.status).length;
-      const pendingCount = payments.filter((p) => !p.status).length;
+      const pendingCount = payments.filter((p) => p.paymentStatus === 'PENDING' && p.rideStatus !== 'CANCELLED').length;
+      const cancelledCount = payments.filter((p) => p.rideStatus === 'CANCELLED').length;
 
       return reply.send({
         success: true,
@@ -1403,6 +1451,7 @@ export class AdminController {
             totalTransactions,
             completedCount,
             pendingCount,
+            cancelledCount,
           },
         },
       });
