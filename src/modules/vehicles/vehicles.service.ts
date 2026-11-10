@@ -394,13 +394,17 @@ export class VehiclesService {
     const assignedAt = new Date();
     const expiresAt = isDriveOnly ? calculateISTEndOfDay(assignedAt) : null;
 
-    // Connect this vehicle to the driver and record assignment timestamps
+    // Connect this vehicle to the driver and record assignment timestamps.
+    // Critical Guard: Reset isOnline to false & shiftStatus to OFF_SHIFT so the driver
+    // cannot be matched or show as Available until they explicitly go online in the app.
     await prisma.driverProfile.update({
       where: { id: driverProfileId },
       data: {
         assignedVehicleId: vehicleId,
         vehicleAssignedAt: isDriveOnly ? assignedAt : null,
         vehicleExpiresAt: expiresAt,
+        isOnline: false,
+        shiftStatus: 'OFF_SHIFT',
       },
     });
 
@@ -408,6 +412,7 @@ export class VehiclesService {
     const updated = await prisma.vehicle.update({
       where: { id: vehicleId },
       data: {
+        isOnline: false,
         assignedDriver: {
           connect: { id: driverProfileId },
         },
