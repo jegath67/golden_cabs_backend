@@ -906,6 +906,23 @@ export class RidesService {
       },
     });
     if (!r) return null;
+
+    if (r.driver?.id) {
+      try {
+        const locMap = await locationCacheService.getLocationsForDrivers([r.driver.id]);
+        const cachedLoc = locMap.get(r.driver.id);
+        if (cachedLoc && cachedLoc.latitude != null && cachedLoc.longitude != null) {
+          (r.driver as any).currentLatitude = cachedLoc.latitude;
+          (r.driver as any).currentLongitude = cachedLoc.longitude;
+          if (cachedLoc.heading != null) (r.driver as any).heading = cachedLoc.heading;
+          if (cachedLoc.speed != null) (r.driver as any).speed = cachedLoc.speed;
+          (r.driver as any).updatedAt = new Date(cachedLoc.updatedAt).toISOString();
+        }
+      } catch (locErr) {
+        console.warn(`[getRideById] Failed to overlay cached location for driver ${r.driver.id}:`, locErr);
+      }
+    }
+
     const meta = (r.stops as any) || {};
     const finalTripType = standardizeTripType({
       customTripType: meta.customTripType,
