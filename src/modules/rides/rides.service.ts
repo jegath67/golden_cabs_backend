@@ -3,6 +3,7 @@ import { notificationsService } from '../notifications/notifications.service';
 import { platformSettingsService } from '../settings/platform-settings.service';
 import { unavailabilityService } from '../unavailability/unavailability.service';
 import { locationCacheService } from '../drivers/location-cache.service';
+import { vehiclesService } from '../vehicles/vehicles.service';
 import { TripStatus } from '../../generated/prisma/client';
 import { standardizeTripType } from '../../utils/trip-type.helper';
 
@@ -867,6 +868,14 @@ export class RidesService {
           data: { rideId: updatedRide.id, amount: String(updatedRide.finalFare), paymentStatus: 'PENDING' },
         }).catch((e) => console.error(e));
       }
+    }
+
+    // Post-trip expiry check for DRIVE_ONLY drivers:
+    // If the daily vehicle allocation expired while this trip was ongoing, unassign it now that trip has completed
+    if (updatedRide.driverId) {
+      vehiclesService
+        .checkAndExpireDriverVehicle(updatedRide.driverId, { reason: 'post_trip_completion' })
+        .catch((err) => console.error('[RideService] Post-trip vehicle expiry check error:', err));
     }
 
     return updatedRide;

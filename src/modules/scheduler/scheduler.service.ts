@@ -33,6 +33,9 @@ class SchedulerService {
 
     console.log(`[SchedulerService] Initialized. Background tasks armed for vehicle reset & scheduled trip auto-expiry.`);
 
+    // Layer 2: Run server-startup catch-up check to clean any expired allocations from previous days
+    this.runStartupCatchUpReset();
+
     // Check every 60 seconds
     this.timer = setInterval(() => {
       this.checkAndRunMidnightReset();
@@ -74,6 +77,19 @@ class SchedulerService {
       hours: parseInt(hoursStr, 10),
       minutes: parseInt(minutesStr, 10),
     };
+  }
+
+  /**
+   * Layer 2 Catch-up: Run on server startup to clean any expired allocations from previous days
+   */
+  async runStartupCatchUpReset() {
+    try {
+      console.log(`[SchedulerService] Running server-startup catch-up check for expired DRIVE_ONLY allocations...`);
+      const result = await vehiclesService.resetDailyDriveOnlyAllocations();
+      console.log(`[SchedulerService] Startup catch-up reset finished: ${result.resetCount} reset, ${result.skippedCount} skipped (active rides).`);
+    } catch (err) {
+      console.error(`[SchedulerService] Error running startup catch-up reset:`, err);
+    }
   }
 
   /**

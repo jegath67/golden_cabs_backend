@@ -1,6 +1,20 @@
 import { prisma } from '../../config/prisma';
 import { notificationsService } from '../notifications/notifications.service';
 
+/**
+ * Calculates end of the current day in IST (23:59:59.999 IST) as a UTC Date object.
+ * Completely immune to local server timezone settings.
+ */
+export function calculateISTEndOfDay(now = new Date()): Date {
+  const istDateStr = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now);
+  return new Date(`${istDateStr}T23:59:59.999+05:30`);
+}
+
 export class VehiclesService {
   async getAllVehicles(filters?: {
     category?: 'BUDGET' | 'PREMIUM' | 'LUXURY';
@@ -307,6 +321,9 @@ export class VehiclesService {
         await prisma.driverProfile.update({
           where: { id: existingVehicle.assignedDriver.id },
           data: {
+            assignedVehicleId: null,
+            vehicleAssignedAt: null,
+            vehicleExpiresAt: null,
             isOnline: false,
             shiftStatus: 'OFF_SHIFT',
           },
@@ -366,7 +383,25 @@ export class VehiclesService {
     // 2b. If this vehicle was previously assigned to another driver, unassign that driver first
     await prisma.driverProfile.updateMany({
       where: { assignedVehicleId: vehicleId, id: { not: driverProfileId } },
-      data: { assignedVehicleId: null },
+      data: {
+        assignedVehicleId: null,
+        vehicleAssignedAt: null,
+        vehicleExpiresAt: null,
+      },
+    });
+
+    const isDriveOnly = driver.personaType === 'DRIVE_ONLY';
+    const assignedAt = new Date();
+    const expiresAt = isDriveOnly ? calculateISTEndOfDay(assignedAt) : null;
+
+    // Connect this vehicle to the driver and record assignment timestamps
+    await prisma.driverProfile.update({
+      where: { id: driverProfileId },
+      data: {
+        assignedVehicleId: vehicleId,
+        vehicleAssignedAt: isDriveOnly ? assignedAt : null,
+        vehicleExpiresAt: expiresAt,
+      },
     });
 
     // 3. Connect this vehicle to the driver
@@ -410,6 +445,143 @@ export class VehiclesService {
     }
 
     return updated;
+  }
+
+  /**
+   * Evaluates if a driver's vehicle allocation has expired.
+   * Safety Rules:
+   * 1. ONLY applies to DRIVE_ONLY drivers.
+   * 2. OWN_VEHICLE / RENTAL drivers NEVER expire.
+   * 3. Vehicles owned by the driver are NEVER expired.
+   * 4. Timezone-independent UTC comparison against vehicleExpiresAt.
+   * 5. Fallback for legacy assignments where vehicleExpiresAt is null:
+   *    Compares allocation date / driver.updatedAt against today's IST start-of-day.
+   */
+  isAllocationExpired(driver: {
+    personaType: string;
+    assignedVehicleId: string | null;
+    vehicleExpiresAt?: Date | null;
+    vehicleAssignedAt?: Date | null;
+    updatedAt?: Date;
+    assignedVehicle?: { ownerId?: string | null } | null;
+  }): boolean {
+    if (driver.personaType !== 'DRIVE_ONLY' || !driver.assignedVehicleId) {
+      return false;
+    }
+
+    if (driver.assignedVehicle?.ownerId && driver.assignedVehicle.ownerId === (driver as any).id) {
+      return false;
+    }
+
+    const now = new Date();
+
+    if (driver.vehicleExpiresAt) {
+      return now.getTime() > new Date(driver.vehicleExpiresAt).getTime();
+    }
+
+    // Fallback for legacy records without explicit vehicleExpiresAt:
+    const istTodayStr = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(now);
+    const istStartOfToday = new Date(`${istTodayStr}T00:00:00.000+05:30`);
+
+    const refDate = driver.vehicleAssignedAt || driver.updatedAt || new Date(0);
+    return new Date(refDate).getTime() < istStartOfToday.getTime();
+  }
+
+  /**
+   * Check and auto-expire a single driver's vehicle allocation if expired and no active ride exists.
+   * Layer 1 (On-login/profile fetch), Layer 3 (shift start/API), and Post-Trip completion use this.
+   */
+  async checkAndExpireDriverVehicle(
+    driverProfileId: string,
+    options?: { reason?: string; force?: boolean }
+  ): Promise<{ expired: boolean; unassigned: boolean; reason?: string }> {
+    const driver = await prisma.driverProfile.findUnique({
+      where: { id: driverProfileId },
+      include: {
+        assignedVehicle: true,
+        user: { select: { id: true, name: true } },
+      },
+    });
+
+    if (!driver || driver.personaType !== 'DRIVE_ONLY' || !driver.assignedVehicleId) {
+      return { expired: false, unassigned: false };
+    }
+
+    const isExpired = this.isAllocationExpired(driver);
+    if (!isExpired) {
+      return { expired: false, unassigned: false };
+    }
+
+    // Business Rule: Check if driver has an active ongoing trip
+    const activeRide = await prisma.ride.findFirst({
+      where: {
+        driverId: driver.id,
+        status: { in: ['SEARCHING', 'ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] },
+      },
+    });
+
+    if (activeRide && !options?.force) {
+      console.log(
+        `[VehicleExpiry] Postponing vehicle unassignment for driver ${driver.user?.name || driver.id}: active trip ${activeRide.bookingCode || activeRide.id} in progress`
+      );
+      return { expired: true, unassigned: false, reason: 'ACTIVE_TRIP_IN_PROGRESS' };
+    }
+
+    const vehicleId = driver.assignedVehicleId;
+    const vehicle = driver.assignedVehicle;
+
+    // Disconnect vehicle and set driver OFF_SHIFT & offline
+    await prisma.$transaction([
+      prisma.driverProfile.update({
+        where: { id: driver.id },
+        data: {
+          assignedVehicleId: null,
+          vehicleAssignedAt: null,
+          vehicleExpiresAt: null,
+          isOnline: false,
+          shiftStatus: 'OFF_SHIFT',
+        },
+      }),
+      ...(vehicleId
+        ? [
+            prisma.vehicle.update({
+              where: { id: vehicleId },
+              data: {
+                isOnline: false,
+                assignedDriver: { disconnect: true },
+              },
+            }),
+          ]
+        : []),
+    ]);
+
+    console.log(
+      `[VehicleExpiry] Auto-expired vehicle ${vehicle?.vehicleNumber || vehicleId} for DRIVE_ONLY driver ${driver.user?.name || driver.id} (Trigger: ${options?.reason || 'auto_check'})`
+    );
+
+    if (driver.userId && vehicle) {
+      notificationsService
+        .sendToUser({
+          userId: driver.userId,
+          title: '🌙 Daily Vehicle Allocation Ended',
+          message: `Your daily allocation for ${vehicle.brand} ${vehicle.model} (${vehicle.vehicleNumber}) has ended. Please request a new vehicle from the Hub when you start your shift.`,
+          type: 'vehicle_unassignment',
+          data: {
+            vehicleId: vehicle.id,
+            vehicleNumber: vehicle.vehicleNumber,
+            reason: 'daily_allocation_expired',
+          },
+          saveToDb: true,
+        })
+        .catch((err) => console.error('Error notifying driver of vehicle expiry:', err));
+    }
+
+    return { expired: true, unassigned: true, reason: 'EXPIRED_AND_UNASSIGNED' };
   }
 
   /**
@@ -478,6 +650,8 @@ export class VehiclesService {
             where: { id: driver.id },
             data: {
               assignedVehicleId: null,
+              vehicleAssignedAt: null,
+              vehicleExpiresAt: null,
               isOnline: false,
               shiftStatus: 'OFF_SHIFT',
             },

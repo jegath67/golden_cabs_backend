@@ -1,6 +1,7 @@
 import { prisma } from '../../config/prisma';
 import { standardizeTripType, StandardizedTripType } from '../../utils/trip-type.helper';
 import { unavailabilityService } from '../unavailability/unavailability.service';
+import { vehiclesService } from '../vehicles/vehicles.service';
 
 export interface DriverAvailabilityResult {
   driverId: string;
@@ -343,6 +344,16 @@ export class DriverAvailabilityService {
           isAvailable: false,
           reasonCode: 'DRIVER_OFF_SHIFT',
           reasonMessage: 'Driver is currently offline or off-shift for immediate dispatch.',
+          driver,
+          vehicle: effectiveVehicle,
+        });
+      }
+
+      if (driver.personaType === 'DRIVE_ONLY' && vehiclesService.isAllocationExpired(driver)) {
+        return wrap({
+          isAvailable: false,
+          reasonCode: 'VEHICLE_ALLOCATION_EXPIRED',
+          reasonMessage: 'Daily vehicle allocation for DRIVE_ONLY driver has expired. Vehicle re-allocation required.',
           driver,
           vehicle: effectiveVehicle,
         });

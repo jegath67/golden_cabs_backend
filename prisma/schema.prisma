@@ -208,6 +208,8 @@ model DriverProfile {
   // Temporarily allocated vehicle for driveOnly persona
   assignedVehicleId String?        @unique
   assignedVehicle   Vehicle?       @relation("DriverAssignedVehicle", fields: [assignedVehicleId], references: [id])
+  vehicleAssignedAt DateTime?
+  vehicleExpiresAt  DateTime?
 
   // Vehicles owned by this partner (ownVehicle / rental persona)
   ownedVehicles     Vehicle[]      @relation("OwnerVehicles")

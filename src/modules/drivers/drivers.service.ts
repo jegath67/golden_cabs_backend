@@ -3,6 +3,7 @@ import { notificationsService } from '../notifications/notifications.service';
 import { unavailabilityService } from '../unavailability/unavailability.service';
 import { normalizePhone } from '../auth/auth.service';
 import { locationCacheService } from './location-cache.service';
+import { vehiclesService } from '../vehicles/vehicles.service';
 
 export class DriversService {
   async getDriverByUserId(userId: string) {
@@ -22,6 +23,21 @@ export class DriversService {
     });
 
     if (!driver) return null;
+
+    // Layer 1: On-login / profile fetch auto-expiry check for DRIVE_ONLY drivers
+    if (driver.personaType === 'DRIVE_ONLY' && driver.assignedVehicleId) {
+      const expiry = await vehiclesService.checkAndExpireDriverVehicle(driver.id, {
+        reason: 'profile_fetch_login',
+      });
+      if (expiry.unassigned) {
+        driver.assignedVehicleId = null;
+        driver.assignedVehicle = null;
+        driver.vehicleAssignedAt = null;
+        driver.vehicleExpiresAt = null;
+        driver.isOnline = false;
+        driver.shiftStatus = 'OFF_SHIFT';
+      }
+    }
 
     let isVehicleRequestPending = false;
     let pendingVehicleRequest = null;
@@ -476,8 +492,12 @@ export class DriversService {
 
       // 3. Guard: Check persona-specific vehicle requirements & vehicle status
       if (driver.personaType === 'DRIVE_ONLY') {
-        if (!driver.assignedVehicleId || !driver.assignedVehicle) {
-          throw new Error('Vehicle allocation required from Hub before starting shift and going online');
+        // Layer 3 Guard: Real-time expiry check before starting shift / going online
+        const expiry = await vehiclesService.checkAndExpireDriverVehicle(driver.id, {
+          reason: 'shift_start_validation',
+        });
+        if (expiry.unassigned || !driver.assignedVehicleId || !driver.assignedVehicle) {
+          throw new Error('Your daily vehicle allocation has ended. Please request a new vehicle from the Hub before starting your shift.');
         }
         if (driver.assignedVehicle.status !== 'VERIFIED') {
           throw new Error(`Assigned vehicle (${driver.assignedVehicle.model}) is ${driver.assignedVehicle.status.toLowerCase()} and cannot be used to start a shift. Please contact support.`);
