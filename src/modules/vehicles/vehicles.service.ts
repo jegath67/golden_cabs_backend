@@ -634,6 +634,11 @@ export class VehiclesService {
         continue;
       }
 
+      // CRITICAL GUARD: Only unassign if allocation has ACTUALLY expired!
+      if (!options?.force && !this.isAllocationExpired(driver)) {
+        continue;
+      }
+
       // Check if driver has an active ongoing trip
       const activeRide = await prisma.ride.findFirst({
         where: {
