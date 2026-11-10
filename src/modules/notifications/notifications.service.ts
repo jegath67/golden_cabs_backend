@@ -411,6 +411,13 @@ export class NotificationsService {
       })
       .filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
 
+    const driverIds = items
+      .map((item) => {
+        const d: any = item.data;
+        return d?.driverId || d?.driver_id;
+      })
+      .filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
+
     const vrStatusMap = new Map<string, string>();
     if (requestIds.length > 0) {
       try {
@@ -424,11 +431,38 @@ export class NotificationsService {
       } catch (_) {}
     }
 
+    const driverAssignedMap = new Map<string, boolean>();
+    if (driverIds.length > 0) {
+      try {
+        const driversWithVehicles = await prisma.driverProfile.findMany({
+          where: {
+            id: { in: driverIds },
+            assignedVehicleId: { not: null },
+          },
+          select: { id: true },
+        });
+        for (const d of driversWithVehicles) {
+          driverAssignedMap.set(d.id, true);
+        }
+      } catch (_) {}
+    }
+
     const enrichedItems = items.map((item) => {
       const d: any = item.data || {};
       const reqId = d?.requestId || d?.request_id;
-      if (reqId && vrStatusMap.has(reqId)) {
-        const liveStatus = vrStatusMap.get(reqId);
+      const driverId = d?.driverId || d?.driver_id;
+
+      const isAssignedByReq = reqId && vrStatusMap.get(reqId) === 'ASSIGNED';
+      const isAssignedByDriver = driverId && driverAssignedMap.get(driverId) === true;
+
+      let liveStatus: string | undefined;
+      if (isAssignedByReq || isAssignedByDriver) {
+        liveStatus = 'ASSIGNED';
+      } else if (reqId && vrStatusMap.has(reqId)) {
+        liveStatus = vrStatusMap.get(reqId);
+      }
+
+      if (liveStatus) {
         return {
           ...item,
           data: {

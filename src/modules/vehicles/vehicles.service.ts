@@ -433,6 +433,15 @@ export class VehiclesService {
       driverProfileId
     ).catch((err) => console.error('Error updating VehicleRequest status:', err));
 
+    // Also update any Notification data status for this driver in PostgreSQL
+    await prisma.$executeRawUnsafe(
+      `UPDATE "Notification"
+       SET "data" = jsonb_set(COALESCE("data"::jsonb, '{}'::jsonb), '{status}', '"ASSIGNED"')
+       WHERE ("data"->>'driverId' = $1 OR "data"->>'driver_id' = $1)
+         AND ("type" IN ('admin_vehicle_request', 'vehicle_request'))`,
+      driverProfileId
+    ).catch((err) => console.error('Error updating Notification data status for driver:', err));
+
     // 5. Send push notification & in-app inbox notification to the driver
     if (driver.userId) {
       await notificationsService.sendToUser({
