@@ -403,7 +403,7 @@ export class NotificationsService {
       prisma.notification.count({ where: { userId, isRead: false } }),
     ]);
 
-    // Synchronize live status for vehicle requests
+    // Synchronize live status for vehicle requests and ride bookings
     const requestIds = items
       .map((item) => {
         const d: any = item.data;
@@ -417,6 +417,20 @@ export class NotificationsService {
         return d?.driverId || d?.driver_id;
       })
       .filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
+
+    const rideIds = items
+      .map((item) => {
+        const d: any = item.data;
+        return d?.rideId || d?.ride_id;
+      })
+      .filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
+
+    const bookingCodes = items
+      .map((item) => {
+        const d: any = item.data;
+        return d?.bookingCode || d?.booking_code;
+      })
+      .filter((code): code is string => typeof code === 'string' && code.trim().length > 0);
 
     const vrStatusMap = new Map<string, string>();
     if (requestIds.length > 0) {
@@ -447,16 +461,84 @@ export class NotificationsService {
       } catch (_) {}
     }
 
+    const rideStatusMap = new Map<
+      string,
+      {
+        status: string;
+        rideStatus: string;
+        driverName?: string | null;
+      }
+    >();
+    if (rideIds.length > 0 || bookingCodes.length > 0) {
+      try {
+        const rides = await prisma.ride.findMany({
+          where: {
+            OR: [
+              ...(rideIds.length > 0 ? [{ id: { in: rideIds } }] : []),
+              ...(bookingCodes.length > 0 ? [{ bookingCode: { in: bookingCodes } }] : []),
+            ],
+          },
+          select: {
+            id: true,
+            bookingCode: true,
+            status: true,
+            driverId: true,
+            driver: {
+              select: {
+                user: { select: { name: true } },
+              },
+            },
+          },
+        });
+        for (const r of rides) {
+          const isCancelledRide = r.status === 'CANCELLED';
+          const isAssignedRide =
+            !isCancelledRide &&
+            (Boolean(r.driverId) ||
+              ['ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING', 'COMPLETED'].includes(r.status));
+          const normalizedStatus = isCancelledRide
+            ? 'CANCELLED'
+            : isAssignedRide
+              ? 'ASSIGNED'
+              : r.status;
+          const info = {
+            status: normalizedStatus,
+            rideStatus: r.status,
+            driverName: r.driver?.user?.name || null,
+          };
+          rideStatusMap.set(r.id, info);
+          if (r.bookingCode) {
+            rideStatusMap.set(r.bookingCode, info);
+          }
+        }
+      } catch (_) {}
+    }
+
     const enrichedItems = items.map((item) => {
       const d: any = item.data || {};
       const reqId = d?.requestId || d?.request_id;
       const driverId = d?.driverId || d?.driver_id;
+      const rideId = d?.rideId || d?.ride_id;
+      const bookingCode = d?.bookingCode || d?.booking_code;
+
+      const isRideNotif =
+        item.type === 'ride_created' ||
+        item.type === 'ride_requested' ||
+        item.type === 'new_booking' ||
+        item.type === 'ride_cancelled' ||
+        Boolean(!reqId && (rideId || bookingCode));
 
       const isAssignedByReq = reqId && vrStatusMap.get(reqId) === 'ASSIGNED';
-      const isAssignedByDriver = driverId && driverAssignedMap.get(driverId) === true;
+      const isAssignedByDriver = !isRideNotif && driverId && driverAssignedMap.get(driverId) === true;
+      const rideInfo = isRideNotif
+        ? (rideId && rideStatusMap.get(rideId)) ||
+          (bookingCode && rideStatusMap.get(bookingCode))
+        : undefined;
 
       let liveStatus: string | undefined;
-      if (isAssignedByReq || isAssignedByDriver) {
+      if (rideInfo) {
+        liveStatus = item.type === 'ride_cancelled' ? 'CANCELLED' : rideInfo.status;
+      } else if (isAssignedByReq || isAssignedByDriver) {
         liveStatus = 'ASSIGNED';
       } else if (reqId && vrStatusMap.has(reqId)) {
         liveStatus = vrStatusMap.get(reqId);
@@ -468,6 +550,12 @@ export class NotificationsService {
           data: {
             ...d,
             status: liveStatus,
+            ...(rideInfo
+              ? {
+                  rideStatus: rideInfo.rideStatus,
+                  ...(rideInfo.driverName ? { assignedDriverName: rideInfo.driverName } : {}),
+                }
+              : {}),
           },
         };
       }
