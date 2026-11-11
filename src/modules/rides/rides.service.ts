@@ -520,7 +520,20 @@ export class RidesService {
     }
 
     // Notify other party
-    if (status === 'ARRIVED') {
+    if (status === 'EN_ROUTE') {
+      const driverName = updated.driver?.user?.name || 'Your driver';
+      notificationsService.sendToUser({
+        userId: ride.customerId,
+        title: '🚖 Driver is on the way!',
+        message: `${driverName} is navigating to your pickup location. Track your ride live in the app.`,
+        type: 'driver_arriving',
+        data: {
+          rideId: ride.id,
+          bookingCode: ride.bookingCode || '',
+          startOtp: ride.startOtp || '',
+        },
+      }).catch((e) => console.error(e));
+    } else if (status === 'ARRIVED') {
       const driverName = updated.driver?.user?.name || 'Your driver';
       notificationsService.sendToUser({
         userId: ride.customerId,
