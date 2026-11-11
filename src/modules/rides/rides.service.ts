@@ -845,7 +845,11 @@ export class RidesService {
       title: '🏁 Trip Completed!',
       message: `Total Fare: ₹${updatedRide.finalFare}. Thank you for choosing Golden Cabs!`,
       type: 'trip_completed',
-      data: { rideId: updatedRide.id, amount: String(updatedRide.finalFare) },
+      data: {
+        rideId: updatedRide.id,
+        bookingCode: updatedRide.bookingCode || '',
+        amount: String(updatedRide.finalFare),
+      },
     }).catch((e) => console.error(e));
 
     if (updatedRide.driver?.userId) {
