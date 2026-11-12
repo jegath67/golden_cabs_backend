@@ -4,6 +4,10 @@ import { standardizeTripType } from '../../utils/trip-type.helper';
 import { driverAvailabilityService } from '../rides/driver-availability.service';
 import { platformSettingsService } from '../settings/platform-settings.service';
 import { locationCacheService } from '../drivers/location-cache.service';
+import {
+  resolveRideCommissionFromRecord,
+  getLedgerTxMapForRides,
+} from '../pricing-slabs/pricing-slabs.service';
 
 function formatDriverCode(driverId?: string | null): string | null {
   if (!driverId) return null;
@@ -24,6 +28,39 @@ export function formatAdminCode(adminId?: string | null): string {
   const clean = String(adminId).replace(/^(GC-)?ADM-/i, '').replace(/-/g, '').toUpperCase();
   const suffix = clean.length >= 5 ? clean.substring(0, 5) : clean.padStart(4, '0');
   return `ADM-${suffix}`;
+}
+
+function formatISTDateTime(date?: Date | string | null): string {
+  if (!date) return '';
+  const d = date instanceof Date ? date : new Date(date);
+  if (isNaN(d.getTime())) return '';
+  return (
+    d.toLocaleDateString('en-GB', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      timeZone: 'Asia/Kolkata',
+    }) +
+    ', ' +
+    d.toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+      timeZone: 'Asia/Kolkata',
+    })
+  );
+}
+
+function formatISTTime(date?: Date | string | null): string {
+  if (!date) return '';
+  const d = date instanceof Date ? date : new Date(date);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+    timeZone: 'Asia/Kolkata',
+  });
 }
 
 function formatRideResponse(r: any) {
@@ -73,24 +110,9 @@ function formatRideResponse(r: any) {
 
   let scheduledDateStr = meta.scheduledDisplay ? String(meta.scheduledDisplay) : '';
   if (!scheduledDateStr && meta.scheduledAt) {
-    const sDate = new Date(meta.scheduledAt);
-    if (!isNaN(sDate.getTime())) {
-      scheduledDateStr = sDate.toLocaleDateString('en-GB', {
-        day: '2-digit',
-        month: 'short',
-        year: 'numeric',
-        timeZone: 'Asia/Kolkata',
-      }) + ', ' + sDate.toLocaleTimeString('en-US', {
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: true,
-        timeZone: 'Asia/Kolkata',
-      });
-    } else {
-      scheduledDateStr = String(meta.scheduledAt);
-    }
+    scheduledDateStr = formatISTDateTime(meta.scheduledAt) || String(meta.scheduledAt);
   }
-  const createdDateStr = r.createdAt ? r.createdAt.toISOString().replace('T', ' ').substring(0, 16) : '';
+  const createdDateStr = formatISTDateTime(r.createdAt);
   const finalDatetime = scheduledDateStr || createdDateStr;
 
   const seatCap = meta.seatCapacity ? String(meta.seatCapacity) : (meta.requestedVehicle?.includes('6') ? '6' : '4');
@@ -153,7 +175,7 @@ function formatRideResponse(r: any) {
       : (Array.isArray(meta.stops) ? meta.stops : []),
     dispatchTimeline: [
       {
-        time: r.createdAt ? r.createdAt.toTimeString().substring(0, 5) : '',
+        time: formatISTTime(r.createdAt),
         event: 'Ride Created',
       },
     ],
@@ -179,7 +201,7 @@ export class AdminController {
 
       const formatted = customers.map((u) => {
         const regDate = u.createdAt ? u.createdAt.toISOString().split('T')[0] : '';
-        const lastActiveDate = u.updatedAt ? u.updatedAt.toISOString().replace('T', ' ').substring(0, 16) : '';
+        const lastActiveDate = u.updatedAt ? formatISTDateTime(u.updatedAt) : '';
 
         return {
           id: u.id,
@@ -251,7 +273,7 @@ export class AdminController {
       }
 
       const regDate = customer.createdAt ? customer.createdAt.toISOString().split('T')[0] : '';
-      const lastActiveDate = customer.updatedAt ? customer.updatedAt.toISOString().replace('T', ' ').substring(0, 16) : '';
+      const lastActiveDate = customer.updatedAt ? formatISTDateTime(customer.updatedAt) : '';
 
       return reply.send({
         success: true,
@@ -983,7 +1005,7 @@ export class AdminController {
                   user: true,
                   rides: {
                     where: { status: 'COMPLETED' },
-                    select: { id: true, paymentMethod: true, finalFare: true, estimatedFare: true },
+                    include: { fareBreakdown: true },
                   },
                 },
               },
@@ -993,8 +1015,12 @@ export class AdminController {
         orderBy: { createdAt: 'desc' },
       });
 
-      const commissionRate = await platformSettingsService.getCommissionRate();
-      const commissionPercent = await platformSettingsService.getCommissionPercent();
+      const fallbackCommissionPercent = await platformSettingsService.getCommissionPercent();
+      const allCompletedRideIds = txs.flatMap((tx) =>
+        (tx.wallet?.driver?.rides || []).map((r) => r.id)
+      );
+      const rideLedgerMap = await getLedgerTxMapForRides(Array.from(new Set(allCompletedRideIds)));
+      const fmtPct = (v: number) => (v % 1 === 0 ? String(v) : v.toFixed(1));
 
       const payouts = txs.map((tx) => {
         const wallet = tx.wallet;
@@ -1011,12 +1037,49 @@ export class AdminController {
         const dateStr = created.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
         const timeStr = created.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
 
-        const earningsVal = wallet?.lifetimeEarnings || 0;
+        const completedRides = driver?.rides || [];
+        let grossEarningsVal = 0;
+        let netRideEarningsVal = 0;
+        let actualCommissionVal = 0;
+        const rateSet = new Set<number>();
+
+        for (const r of completedRides) {
+          const resolved = resolveRideCommissionFromRecord(
+            r,
+            fallbackCommissionPercent,
+            rideLedgerMap.get(r.id)
+          );
+          grossEarningsVal += resolved.grossFare;
+          netRideEarningsVal += resolved.driverAmount;
+          actualCommissionVal += resolved.commissionAmount;
+          if (resolved.commissionPercent != null) {
+            rateSet.add(resolved.commissionPercent);
+          }
+        }
+
+        grossEarningsVal = Math.round(grossEarningsVal * 100) / 100;
+        netRideEarningsVal = Math.round(netRideEarningsVal * 100) / 100;
+        actualCommissionVal = Math.round(actualCommissionVal * 100) / 100;
+
+        let commissionPercentLabel = `${fmtPct(fallbackCommissionPercent)}%`;
+        if (completedRides.length > 0 && rateSet.size === 1) {
+          commissionPercentLabel = `${fmtPct(Array.from(rateSet)[0]!)}%`;
+        } else if (grossEarningsVal > 0 && rateSet.size > 1) {
+          const avg = Math.round((actualCommissionVal / grossEarningsVal) * 1000) / 10;
+          commissionPercentLabel = `${fmtPct(avg)}% Avg`;
+        }
+
+        const lifetimeNetVal = Math.round((wallet?.lifetimeEarnings || netRideEarningsVal) * 100) / 100;
         const balanceVal = wallet?.balance || 0;
         const outstandingDues = balanceVal < 0 ? Math.abs(balanceVal) : 0;
-        const ridesCount = driver?.rides?.length || 0;
+        const ridesCount = completedRides.length;
         const payoutAmt = tx.amount;
-        const commissionVal = Math.round(earningsVal * commissionRate);
+
+        // Prefer immutable bank snapshot saved on withdrawal transaction; fallback to wallet
+        const snapBankName = tx.bankName || wallet?.bankName || '';
+        const snapBankAcct = tx.bankAccountNumber || wallet?.bankAccountNumber || '';
+        const snapBankIfsc = tx.bankIfsc || wallet?.bankIfsc || '';
+        const snapBankHolder = tx.bankHolderName || wallet?.bankHolderName || '';
 
         return {
           id: tx.id,
@@ -1026,24 +1089,30 @@ export class AdminController {
           driverName: user?.name || 'Driver Partner',
           driverPhone: user?.phone || '',
           driverPhoto: driver?.selfieImage || null,
-          earnings: `₹ ${Math.round(earningsVal).toLocaleString()}`,
-          rawEarnings: earningsVal,
+          earnings: `₹ ${Math.round(lifetimeNetVal).toLocaleString()}`,
+          rawEarnings: lifetimeNetVal,
+          grossEarnings: `₹ ${Math.round(grossEarningsVal).toLocaleString()}`,
+          rawGrossEarnings: grossEarningsVal,
+          netEarnings: `₹ ${Math.round(netRideEarningsVal).toLocaleString()}`,
+          rawNetEarnings: netRideEarningsVal,
           walletBalance: `₹ ${Math.round(balanceVal).toLocaleString()}`,
           rawWalletBalance: balanceVal,
           outstandingDues: `₹ ${Math.round(outstandingDues).toLocaleString()}`,
           rawOutstandingDues: outstandingDues,
           rides: `${ridesCount} Rides`,
-          commission: `₹ ${commissionVal.toLocaleString()}`,
-          commissionPercent: `${commissionPercent}%`,
+          commission: `₹ ${Math.round(actualCommissionVal).toLocaleString()}`,
+          rawCommission: actualCommissionVal,
+          commissionPercent: commissionPercentLabel,
           payoutAmount: `₹ ${Math.round(payoutAmt).toLocaleString()}`,
           rawPayoutAmount: payoutAmt,
-          method: wallet?.bankAccountNumber ? 'Bank Transfer' : 'UPI',
-          methodDetail: wallet?.bankAccountNumber
-            ? `**** ${wallet.bankAccountNumber.slice(-4)}`
-            : (wallet?.bankIfsc || 'UPI Transfer'),
-          bankAccountNumber: wallet?.bankAccountNumber || '',
-          bankIfsc: wallet?.bankIfsc || '',
-          bankHolderName: wallet?.bankHolderName || '',
+          method: snapBankAcct ? 'Bank Transfer' : 'UPI',
+          methodDetail: snapBankAcct
+            ? `**** ${snapBankAcct.slice(-4)}`
+            : (snapBankIfsc || 'UPI Transfer'),
+          bankName: snapBankName,
+          bankAccountNumber: snapBankAcct,
+          bankIfsc: snapBankIfsc,
+          bankHolderName: snapBankHolder,
           date: dateStr,
           time: timeStr,
           status: displayStatus,
@@ -1066,18 +1135,8 @@ export class AdminController {
       const { id } = req.params as { id: string };
       const { status, utrNumber, rejectionReason } = (req.body as any) || {};
 
-      const tx = await prisma.walletTransaction.findUnique({
-        where: { id },
-        include: { wallet: true },
-      });
-
-      if (!tx) {
-        return reply.status(404).send({ success: false, message: 'Payout transaction not found' });
-      }
-
-      const sUpper = (status || '').toUpperCase();
-      let targetStatus: any = tx.status;
-
+      const sUpper = String(status || '').trim().toUpperCase();
+      let targetStatus: 'APPROVED' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
       if (sUpper === 'APPROVED') {
         targetStatus = 'APPROVED';
       } else if (sUpper === 'PROCESSING') {
@@ -1086,117 +1145,156 @@ export class AdminController {
         targetStatus = 'COMPLETED';
       } else if (sUpper === 'FAILED' || sUpper === 'REJECTED') {
         targetStatus = 'FAILED';
-      } else if (sUpper === 'PENDING') {
-        targetStatus = 'PENDING';
+      } else {
+        return reply.status(400).send({
+          success: false,
+          message: `Invalid payout status '${status}'. Allowed targets: APPROVED, PROCESSING, COMPLETED (PAID), FAILED (REJECTED)`,
+        });
       }
 
-      // Scenario A: Mark as Paid
-      if (targetStatus === 'COMPLETED') {
-        if (tx.status === 'COMPLETED') {
-          return reply.status(400).send({ success: false, message: 'This payout is already marked as paid' });
-        }
-        if (tx.status === 'FAILED') {
-          return reply.status(400).send({ success: false, message: 'Cannot mark a rejected payout as paid' });
-        }
-
-        const cleanUtr = utrNumber ? String(utrNumber).trim() : '';
-        if (!cleanUtr) {
-          return reply.status(400).send({ success: false, message: 'Bank UTR / Reference number is mandatory to mark payout as paid' });
-        }
-
-        const duplicateUtr = await prisma.walletTransaction.findFirst({
-          where: {
-            utrNumber: cleanUtr,
-            id: { not: tx.id },
-          },
+      const cleanUtr = utrNumber ? String(utrNumber).trim() : '';
+      const cleanReason = rejectionReason ? String(rejectionReason).trim() : '';
+      if (targetStatus === 'COMPLETED' && !cleanUtr) {
+        return reply.status(400).send({
+          success: false,
+          message: 'Bank UTR / Reference number is mandatory to mark payout as paid',
         });
-        if (duplicateUtr) {
-          return reply.status(400).send({
-            success: false,
-            message: `UTR number '${cleanUtr}' has already been recorded for another payout`,
-          });
+      }
+      if (targetStatus === 'FAILED' && !cleanReason) {
+        return reply.status(400).send({
+          success: false,
+          message: 'Rejection reason is mandatory when rejecting a cashout',
+        });
+      }
+
+      const VALID_TRANSITIONS: Record<string, string[]> = {
+        PENDING: ['APPROVED', 'PROCESSING', 'COMPLETED', 'FAILED'],
+        APPROVED: ['PROCESSING', 'COMPLETED', 'FAILED'],
+        PROCESSING: ['COMPLETED', 'FAILED'],
+        COMPLETED: [],
+        FAILED: [],
+      };
+
+      const txResult = await prisma.$transaction(async (prismaTx) => {
+        // Lock payout row to serialize simultaneous Paid / Reject / Approve updates
+        const lockedTxs = await prismaTx.$queryRaw<any[]>`
+          SELECT * FROM "WalletTransaction" WHERE "id" = ${id} FOR UPDATE
+        `;
+        const tx = lockedTxs[0];
+        if (!tx) {
+          throw Object.assign(new Error('Payout transaction not found'), { statusCode: 404 });
         }
 
-        await prisma.$transaction(async (prismaTx) => {
-          await prismaTx.walletTransaction.update({
-            where: { id },
+        if (tx.type !== 'WITHDRAWAL') {
+          throw Object.assign(
+            new Error(`Transaction type '${tx.type}' cannot be processed through payout endpoints`),
+            { statusCode: 400 }
+          );
+        }
+
+        const allowed = VALID_TRANSITIONS[tx.status] || [];
+        if (!allowed.includes(targetStatus)) {
+          throw Object.assign(
+            new Error(`Invalid payout transition: ${tx.status} -> ${targetStatus}`),
+            { statusCode: 400 }
+          );
+        }
+
+        // Lock driver's wallet row
+        const lockedWallets = await prismaTx.$queryRaw<any[]>`
+          SELECT * FROM "Wallet" WHERE "id" = ${tx.walletId} FOR UPDATE
+        `;
+        const liveWallet = lockedWallets[0];
+        if (!liveWallet) {
+          throw Object.assign(new Error('Wallet not found'), { statusCode: 404 });
+        }
+
+        const txAmount = Math.round(Number(tx.amount) * 100) / 100;
+        const snapshotBank = {
+          bankName: tx.bankName || liveWallet.bankName || null,
+          bankAccountNumber: tx.bankAccountNumber || liveWallet.bankAccountNumber || null,
+          bankIfsc: tx.bankIfsc || liveWallet.bankIfsc || null,
+          bankHolderName: tx.bankHolderName || liveWallet.bankHolderName || null,
+        };
+
+        if (targetStatus === 'COMPLETED') {
+          const duplicateUtr = await prismaTx.walletTransaction.findFirst({
+            where: {
+              utrNumber: cleanUtr,
+              id: { not: tx.id },
+            },
+          });
+          if (duplicateUtr) {
+            throw Object.assign(
+              new Error(`UTR number '${cleanUtr}' has already been recorded for another payout`),
+              { statusCode: 400 }
+            );
+          }
+
+          const updatedRows = await prismaTx.walletTransaction.updateMany({
+            where: { id, status: tx.status as any, type: 'WITHDRAWAL' },
             data: {
               status: 'COMPLETED',
               utrNumber: cleanUtr,
               paidAt: new Date(),
+              ...snapshotBank,
             },
           });
+          if (updatedRows.count !== 1) {
+            throw Object.assign(new Error('Payout status changed concurrently; please refresh'), {
+              statusCode: 409,
+            });
+          }
 
+          const nextPending = Math.max(
+            0,
+            Math.round((Number(liveWallet.pendingWithdrawals) - txAmount) * 100) / 100
+          );
           await prismaTx.wallet.update({
-            where: { id: tx.walletId },
-            data: {
-              pendingWithdrawals: {
-                decrement: Math.min(tx.wallet.pendingWithdrawals, tx.amount),
-              },
-            },
+            where: { id: liveWallet.id },
+            data: { pendingWithdrawals: nextPending },
           });
-        });
 
-        return reply.send({
-          success: true,
-          message: `Payout marked as PAID (UTR: ${cleanUtr})`,
-          data: { id, status: 'COMPLETED', utrNumber: cleanUtr },
-        });
-      }
-
-      // Scenario B: Reject Payout
-      if (targetStatus === 'FAILED') {
-        if (tx.status === 'COMPLETED') {
-          return reply.status(400).send({ success: false, message: 'Cannot reject an already completed payout' });
-        }
-        if (tx.status === 'FAILED') {
-          // Idempotent: already rejected
-          return reply.send({
-            success: true,
-            message: 'Payout is already marked as rejected',
-            data: { id, status: 'FAILED' },
-          });
+          return {
+            message: `Payout marked as PAID (UTR: ${cleanUtr})`,
+            data: { id, status: 'COMPLETED', utrNumber: cleanUtr },
+          };
         }
 
-        const cleanReason = rejectionReason ? String(rejectionReason).trim() : '';
-        if (!cleanReason) {
-          return reply.status(400).send({ success: false, message: 'Rejection reason is mandatory when rejecting a cashout' });
-        }
-
-        await prisma.$transaction(async (prismaTx) => {
-          const liveWallet = await prismaTx.wallet.findUnique({
-            where: { id: tx.walletId },
-          });
-          if (!liveWallet) throw new Error('Wallet not found');
-
-          const prevBal = liveWallet.balance;
-          const restoredBal = Math.round((prevBal + tx.amount) * 100) / 100;
-
-          // 1. Release reserved amount back to driver available balance
-          await prismaTx.wallet.update({
-            where: { id: tx.walletId },
-            data: {
-              balance: { increment: tx.amount },
-              pendingWithdrawals: {
-                decrement: Math.min(liveWallet.pendingWithdrawals, tx.amount),
-              },
-            },
-          });
-
-          // 2. Mark original withdrawal as FAILED
-          await prismaTx.walletTransaction.update({
-            where: { id },
+        if (targetStatus === 'FAILED') {
+          const updatedRows = await prismaTx.walletTransaction.updateMany({
+            where: { id, status: tx.status as any, type: 'WITHDRAWAL' },
             data: {
               status: 'FAILED',
               rejectionReason: cleanReason,
+              ...snapshotBank,
+            },
+          });
+          if (updatedRows.count !== 1) {
+            throw Object.assign(new Error('Payout status changed concurrently; please refresh'), {
+              statusCode: 409,
+            });
+          }
+
+          const prevBal = Math.round(Number(liveWallet.balance) * 100) / 100;
+          const restoredBal = Math.round((prevBal + txAmount) * 100) / 100;
+          const nextPending = Math.max(
+            0,
+            Math.round((Number(liveWallet.pendingWithdrawals) - txAmount) * 100) / 100
+          );
+
+          await prismaTx.wallet.update({
+            where: { id: liveWallet.id },
+            data: {
+              balance: restoredBal,
+              pendingWithdrawals: nextPending,
             },
           });
 
-          // 3. Create reversal ledger entry for audit trail
           await prismaTx.walletTransaction.create({
             data: {
-              walletId: tx.walletId,
-              amount: tx.amount,
+              walletId: liveWallet.id,
+              amount: txAmount,
               type: 'ADJUSTMENT',
               status: 'COMPLETED',
               previousBalance: prevBal,
@@ -1204,35 +1302,37 @@ export class AdminController {
               description: `Refund: Cashout request #${tx.id.substring(0, 8)} rejected (${cleanReason})`,
             },
           });
+
+          return {
+            message: `Payout rejected and ₹${txAmount} released back to driver wallet`,
+            data: { id, status: 'FAILED', rejectionReason: cleanReason },
+          };
+        }
+
+        // APPROVED or PROCESSING
+        const updatedRows = await prismaTx.walletTransaction.updateMany({
+          where: { id, status: tx.status as any, type: 'WITHDRAWAL' },
+          data: { status: targetStatus },
         });
+        if (updatedRows.count !== 1) {
+          throw Object.assign(new Error('Payout status changed concurrently; please refresh'), {
+            statusCode: 409,
+          });
+        }
 
-        return reply.send({
-          success: true,
-          message: `Payout rejected and ₹${tx.amount} released back to driver wallet`,
-          data: { id, status: 'FAILED', rejectionReason: cleanReason },
-        });
-      }
-
-      // Scenario C: APPROVED or PROCESSING
-      if (tx.status === 'COMPLETED') {
-        return reply.status(400).send({ success: false, message: 'Cannot modify an already completed payout' });
-      }
-      if (tx.status === 'FAILED') {
-        return reply.status(400).send({ success: false, message: 'Cannot modify a rejected payout' });
-      }
-
-      await prisma.walletTransaction.update({
-        where: { id },
-        data: { status: targetStatus },
+        return {
+          message: `Payout status updated to ${targetStatus}`,
+          data: { id, status: targetStatus },
+        };
       });
 
-      return reply.send({
-        success: true,
-        message: `Payout status updated to ${targetStatus}`,
-        data: { id, status: targetStatus },
-      });
+      return reply.send({ success: true, ...txResult });
     } catch (error: any) {
-      return reply.status(500).send({ success: false, message: error.message || 'Failed to update payout status' });
+      const code = error?.statusCode || 400;
+      return reply.status(code).send({
+        success: false,
+        message: error.message || 'Failed to update payout status',
+      });
     }
   }
 
@@ -1293,21 +1393,40 @@ export class AdminController {
       let totalCashCollections = 0;
       let totalOnlineCollections = 0;
       let totalCompanyCommission = 0;
-      const commissionRate = await platformSettingsService.getCommissionRate();
+      let totalCompletedGross = 0;
+      let totalDriverNetEarnings = 0;
+      const rateSet = new Set<number>();
       const commissionPercent = await platformSettingsService.getCommissionPercent();
+      const settledTxByRide = await getLedgerTxMapForRides(completedRides.map((r) => r.id));
 
       for (const r of completedRides) {
-        const fare = r.fareBreakdown?.totalFare ?? r.finalFare ?? r.estimatedFare ?? 0;
-        const discount = r.fareBreakdown?.discountAmount ?? 0;
-        const gross = fare + discount;
-        const commission = Math.round(gross * commissionRate * 100) / 100;
+        const resolved = resolveRideCommissionFromRecord(
+          r,
+          commissionPercent,
+          settledTxByRide.get(r.id)
+        );
+        const fare = resolved.fare;
 
-        totalCompanyCommission += commission;
+        totalCompletedGross += resolved.grossFare;
+        totalDriverNetEarnings += resolved.driverAmount;
+        totalCompanyCommission += resolved.commissionAmount;
+        if (resolved.commissionPercent != null) {
+          rateSet.add(resolved.commissionPercent);
+        }
         if (r.paymentMethod === 'CASH') {
           totalCashCollections += fare;
         } else {
           totalOnlineCollections += fare;
         }
+      }
+
+      const fmtPct = (v: number) => (v % 1 === 0 ? String(v) : v.toFixed(1));
+      let commissionPercentLabel = `${fmtPct(commissionPercent)}%`;
+      if (completedRides.length > 0 && rateSet.size === 1) {
+        commissionPercentLabel = `${fmtPct(Array.from(rateSet)[0]!)}%`;
+      } else if (totalCompletedGross > 0 && rateSet.size > 1) {
+        const avg = Math.round((totalCompanyCommission / totalCompletedGross) * 1000) / 10;
+        commissionPercentLabel = `${fmtPct(avg)}% Avg`;
       }
 
       const paidPayouts = await prisma.walletTransaction.aggregate({
@@ -1329,6 +1448,9 @@ export class AdminController {
         success: true,
         data: {
           totalDriverLifetimeEarnings: Math.round(totalDriverLifetimeEarnings * 100) / 100,
+          totalCompletedGross: Math.round(totalCompletedGross * 100) / 100,
+          totalDriverNetEarnings: Math.round(totalDriverNetEarnings * 100) / 100,
+          effectiveCommissionPercent: commissionPercentLabel,
           totalOutstandingDues: Math.round(totalOutstandingDues * 100) / 100,
           totalAvailableBalances: Math.round(totalAvailableBalances * 100) / 100,
           totalPendingWithdrawals: Math.round(totalPendingWithdrawals * 100) / 100,
@@ -1365,6 +1487,8 @@ export class AdminController {
         } else if (s === 'PENDING') {
           where.paymentStatus = 'PENDING';
           where.status = { not: 'CANCELLED' };
+        } else if (s === 'FAILED') {
+          where.paymentTransactions = { some: { status: 'FAILED' } };
         } else if (s === 'CANCELLED') {
           where.status = 'CANCELLED';
         } else if (s === 'REFUNDED') {
@@ -1399,20 +1523,42 @@ export class AdminController {
           customer: true,
           driver: { include: { user: true } },
           fareBreakdown: true,
+          paymentTransactions: {
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+          },
         },
         orderBy: { createdAt: 'desc' },
       });
 
+      const fallbackPercent = await platformSettingsService.getCommissionPercent();
+      const txByRide = await getLedgerTxMapForRides(rides.map((r) => r.id));
+
       const payments = rides.map((r) => {
         const meta = (r.stops as any) || {};
-        const fare = r.finalFare || r.fareBreakdown?.totalFare || r.estimatedFare || 0.0;
+        const latestGatewayTx = r.paymentTransactions?.[0] || null;
+        const resolved = resolveRideCommissionFromRecord(
+          r,
+          fallbackPercent,
+          txByRide.get(r.id)
+        );
+        const fare = resolved.fare;
         // Strictly check paymentStatus === 'PAID'
         const isPaid = r.paymentStatus === 'PAID';
+        const effectiveGatewayStatus = latestGatewayTx?.status || r.paymentStatus;
 
         return {
           orderId: r.bookingCode || `GC-${r.id.substring(0, 5).toUpperCase()}`,
-          // Internal reference - not pretending to be a gateway transaction ID
-          paymentId: r.bookingCode ? `REF-${r.bookingCode}` : `REF-${r.id.substring(0, 8).toUpperCase()}`,
+          // Internal or actual gateway payment reference
+          paymentId:
+            latestGatewayTx?.razorpayPaymentId ||
+            (r.bookingCode ? `REF-${r.bookingCode}` : `REF-${r.id.substring(0, 8).toUpperCase()}`),
+          razorpayOrderId: latestGatewayTx?.razorpayOrderId || meta.gatewayOrderId || null,
+          razorpayPaymentId: latestGatewayTx?.razorpayPaymentId || meta.gatewayPaymentId || null,
+          gatewayMethod: latestGatewayTx?.gatewayMethod || null,
+          gatewayStatus: effectiveGatewayStatus,
+          verificationStatus: latestGatewayTx?.verificationStatus || (isPaid ? 'VERIFIED' : 'UNVERIFIED'),
+          failureReason: latestGatewayTx?.failureReason || null,
           rideId: r.id,
           userName: r.customer?.name || 'Customer',
           customerPhone: r.customer?.phone || '',
@@ -1424,6 +1570,12 @@ export class AdminController {
             distanceKm: r.distanceKm,
           }),
           amount: fare,
+          baseFare: resolved.baseFare,
+          discountAmount: resolved.discount,
+          commissionPercent: resolved.commissionPercent,
+          commissionAmount: resolved.commissionAmount,
+          driverAmount: resolved.driverAmount,
+          pricingSlabId: resolved.pricingSlabId,
           paymentMode: r.paymentMethod || 'CASH',
           paymentStatus: r.paymentStatus,
           rideStatus: r.status,
@@ -1437,10 +1589,20 @@ export class AdminController {
       });
 
       const totalRevenue = payments.reduce((acc, p) => acc + (p.status ? p.amount : 0), 0);
+      const totalCommission = Math.round(
+        payments.reduce((acc, p) => acc + (p.status ? p.commissionAmount : 0), 0) * 100
+      ) / 100;
+      const totalDriverShare = Math.round(
+        payments.reduce((acc, p) => acc + (p.status ? p.driverAmount : 0), 0) * 100
+      ) / 100;
       const totalTransactions = payments.length;
       const completedCount = payments.filter((p) => p.status).length;
-      const pendingCount = payments.filter((p) => p.paymentStatus === 'PENDING' && p.rideStatus !== 'CANCELLED').length;
+      const failedCount = payments.filter((p) => p.gatewayStatus === 'FAILED' && !p.status).length;
+      const pendingCount = payments.filter(
+        (p) => p.paymentStatus === 'PENDING' && p.rideStatus !== 'CANCELLED' && p.gatewayStatus !== 'FAILED'
+      ).length;
       const cancelledCount = payments.filter((p) => p.rideStatus === 'CANCELLED').length;
+      const refundedCount = payments.filter((p) => p.paymentStatus === 'REFUNDED').length;
 
       return reply.send({
         success: true,
@@ -1448,10 +1610,14 @@ export class AdminController {
           payments,
           stats: {
             totalRevenue,
+            totalCommission,
+            totalDriverShare,
             totalTransactions,
             completedCount,
             pendingCount,
+            failedCount,
             cancelledCount,
+            refundedCount,
           },
         },
       });

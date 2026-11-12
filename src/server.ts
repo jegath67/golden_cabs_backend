@@ -25,6 +25,7 @@ import { advertisingPartnersRoutes } from './modules/advertising-partners/advert
 import { supportRoutes } from './modules/support/support.routes';
 import { unavailabilityRoutes } from './modules/unavailability/unavailability.routes';
 import { pricingSlabsRoutes } from './modules/pricing-slabs/pricing-slabs.routes';
+import { paymentsRoutes } from './modules/payments/payments.routes';
 import { schedulerService } from './modules/scheduler/scheduler.service';
 import { initRedis, isRedisAvailable, disconnectRedis } from './config/redis';
 import { locationCacheService } from './modules/drivers/location-cache.service';
@@ -158,6 +159,7 @@ app.register(advertisingPartnersRoutes, { prefix: '/api/advertising-partners' })
 app.register(supportRoutes, { prefix: '/api/support' });
 app.register(unavailabilityRoutes, { prefix: '/api' });
 app.register(pricingSlabsRoutes, { prefix: '/api/pricing-slabs' });
+app.register(paymentsRoutes, { prefix: '/api/payments' });
 
 const start = async () => {
   try {

@@ -42,7 +42,7 @@ export class WalletController {
 
   async updateBankDetails(req: FastifyRequest<any>, reply: FastifyReply) {
     const user = req.user as { id: string };
-    const { bankAccountNumber, bankIfsc, bankHolderName } = (req.body as any) || {};
+    const { bankName, bankAccountNumber, bankIfsc, bankHolderName } = (req.body as any) || {};
 
     if (!bankAccountNumber || !bankIfsc || !bankHolderName) {
       return reply.status(400).send({
@@ -53,6 +53,7 @@ export class WalletController {
 
     try {
       const updated = await walletService.updateBankDetails(user.id, {
+        ...(bankName !== undefined ? { bankName } : {}),
         bankAccountNumber,
         bankIfsc,
         bankHolderName,

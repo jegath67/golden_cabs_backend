@@ -1,291 +1,433 @@
 import { prisma } from '../../config/prisma';
+import {
+  FuelType,
+  GearType,
+  VehicleCategory,
+  VehicleStatus,
+  VehicleType,
+} from '../../generated/prisma/client';
+
+const ACTIVE_RIDE_STATUSES = ['ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] as const;
+const DEFAULT_COVER_IMAGE = 'assets/images/all_vehicles/Ferrari-4.jpg';
+
+function parseSeatCount(seats: unknown): number {
+  if (typeof seats === 'number' && Number.isFinite(seats) && seats > 0) {
+    return Math.round(seats);
+  }
+  const digits = String(seats ?? '').replace(/[^0-9]/g, '');
+  const parsed = parseInt(digits, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 4;
+}
+
+function mapFuelType(raw?: unknown): FuelType {
+  const upper = String(raw || 'PETROL').trim().toUpperCase();
+  if (upper === 'DIESEL') return 'DIESEL';
+  if (upper === 'ELECTRIC' || upper === 'EV') return 'ELECTRIC';
+  if (upper === 'CNG') return 'CNG';
+  return 'PETROL';
+}
+
+function mapGearType(raw?: unknown): GearType {
+  const upper = String(raw || 'AUTOMATIC').trim().toUpperCase();
+  return upper === 'MANUAL' ? 'MANUAL' : 'AUTOMATIC';
+}
+
+function mapVehicleCategory(raw?: unknown): VehicleCategory {
+  const upper = String(raw || 'LUXURY').trim().toUpperCase();
+  if (upper === 'BUDGET') return 'BUDGET';
+  if (upper === 'PREMIUM') return 'PREMIUM';
+  return 'LUXURY';
+}
+
+function mapVehicleType(rawType?: unknown, category?: VehicleCategory): VehicleType {
+  const upper = String(rawType || '').trim().toUpperCase();
+  if (upper === 'SEDAN') return 'SEDAN';
+  if (upper === 'SUV') return 'SUV';
+  if (upper === 'HATCHBACK') return 'HATCHBACK';
+  if (upper === 'AUTO') return 'AUTO';
+  if (upper === 'LUXURY') return 'LUXURY';
+  return category === 'LUXURY' ? 'LUXURY' : 'SEDAN';
+}
+
+function formatEnumLabel(val: string | null | undefined, fallback: string): string {
+  if (!val) return fallback;
+  const upper = val.toUpperCase();
+  if (upper === 'SUV') return 'SUV';
+  if (upper === 'CNG') return 'CNG';
+  return val.charAt(0).toUpperCase() + val.slice(1).toLowerCase();
+}
+
+function formatCategoryLabel(category: VehicleCategory): string {
+  if (category === 'LUXURY') return 'Luxury';
+  if (category === 'PREMIUM') return 'Premium';
+  return 'Budget';
+}
+
+function parseStatusMapping(rawStatus?: unknown): {
+  vehicleStatus: VehicleStatus;
+  eliteStatus: string;
+  isOnline: boolean;
+} {
+  const upper = String(rawStatus || 'AVAILABLE').trim().toUpperCase();
+  if (upper === 'MAINTENANCE' || upper === 'INACTIVE') {
+    return { vehicleStatus: 'MAINTENANCE', eliteStatus: 'MAINTENANCE', isOnline: false };
+  }
+  if (upper === 'BOOKED' || upper === 'ON_TRIP' || upper === 'UNAVAILABLE') {
+    return { vehicleStatus: 'VERIFIED', eliteStatus: upper, isOnline: false };
+  }
+  return { vehicleStatus: 'VERIFIED', eliteStatus: 'AVAILABLE', isOnline: true };
+}
+
+async function generateUniqueElitePlate(): Promise<string> {
+  const count = await prisma.vehicle.count({ where: { category: 'LUXURY' } });
+  let seq = count + 1;
+  while (true) {
+    const candidate = `ELITE-${String(seq).padStart(3, '0')}`;
+    const exists = await prisma.vehicle.findUnique({ where: { vehicleNumber: candidate } });
+    if (!exists) return candidate;
+    seq += 1;
+  }
+}
+
+const VEHICLE_ELITE_INCLUDE = {
+  photos: { orderBy: { createdAt: 'asc' as const } },
+  owner: { include: { user: true } },
+  assignedDriver: { include: { user: true } },
+  rides: {
+    where: {
+      status: { in: [...ACTIVE_RIDE_STATUSES] },
+    },
+    take: 1,
+  },
+};
 
 export class EliteCarsService {
-  async getAllCars(brand?: string, status?: string, category?: string) {
-    const isBudgetOnly = category && category.toLowerCase() === 'budget';
-    const isLuxuryOnly = category && category.toLowerCase() === 'luxury';
+  private async checkDriverOnTrip(v: any): Promise<boolean> {
+    if (Array.isArray(v.rides) && v.rides.length > 0) return true;
 
-    let luxuryCars: any[] = [];
-    if (!isBudgetOnly) {
-      const count = await prisma.eliteCar.count();
-      if (count === 0) {
-        await this.seedDefaultCars();
-      }
+    const driverIds = [v.ownerId, v.assignedDriver?.id].filter(
+      (id): id is string => typeof id === 'string' && id.length > 0
+    );
+    if (driverIds.length === 0) return false;
 
-      const where: any = {};
-      if (brand && brand !== 'All' && brand !== 'All Brands') {
-        where.brand = { contains: brand, mode: 'insensitive' };
-      }
-      if (status && status !== 'All') {
-        where.status = { equals: status, mode: 'insensitive' };
-      }
-
-      const rawLuxury = await prisma.eliteCar.findMany({
-        where,
-        orderBy: { createdAt: 'desc' },
-      });
-
-      luxuryCars = rawLuxury.map((c) => ({
-        ...c,
-        category: 'Luxury',
-        starCount: String(c.rating || '4.9'),
-        carName: c.model.toLowerCase().startsWith(c.brand.toLowerCase())
-          ? c.model
-          : `${c.brand} ${c.model}`,
-      }));
-    }
-
-    let budgetVehicles: any[] = [];
-    if (!isLuxuryOnly) {
-      const vWhere: any = {
-        status: 'VERIFIED',
-        OR: [
-          { owner: { personaType: { in: ['RENTAL', 'OWN_VEHICLE'] } } },
-          { ownerId: { not: null } },
-        ],
-      };
-
-      if (brand && brand !== 'All' && brand !== 'All Brands') {
-        vWhere.brand = { contains: brand, mode: 'insensitive' };
-      }
-
-      const vehicles = await prisma.vehicle.findMany({
-        where: vWhere,
-        include: {
-          photos: { orderBy: { createdAt: 'asc' } },
-          owner: { include: { user: true } },
-          assignedDriver: { include: { user: true } },
-          rides: {
-            where: {
-              status: { in: ['ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] },
-            },
-            take: 1,
-          },
-        },
-        orderBy: { createdAt: 'desc' },
-      });
-
-      for (const v of vehicles) {
-        const hasActiveRide = Array.isArray(v.rides) && v.rides.length > 0;
-
-        let isDriverOnTrip = false;
-        if (!hasActiveRide) {
-          if (v.ownerId) {
-            const activeOwnerRide = await prisma.ride.findFirst({
-              where: {
-                driverId: v.ownerId,
-                status: { in: ['ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] },
-              },
-            });
-            if (activeOwnerRide) isDriverOnTrip = true;
-          }
-          if (!isDriverOnTrip && v.assignedDriver?.id) {
-            const activeAssignedRide = await prisma.ride.findFirst({
-              where: {
-                driverId: v.assignedDriver.id,
-                status: { in: ['ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] },
-              },
-            });
-            if (activeAssignedRide) isDriverOnTrip = true;
-          }
-        }
-
-        const isOnTrip = hasActiveRide || isDriverOnTrip;
-        const liveStatus = isOnTrip ? 'ON_TRIP' : 'AVAILABLE';
-
-        if (status && status !== 'All') {
-          const reqStatus = status.toUpperCase();
-          if (reqStatus === 'AVAILABLE' && isOnTrip) continue;
-          if ((reqStatus === 'ON_TRIP' || reqStatus === 'BOOKED') && !isOnTrip) continue;
-        }
-
-        const mainPhoto = v.photos && v.photos.length > 0
-          ? v.photos[0].photoUrl
-          : 'assets/images/all_vehicles/Ferrari-4.jpg';
-        const gallery = v.photos && v.photos.length > 0
-          ? v.photos.map((p) => p.photoUrl)
-          : [mainPhoto];
-
-        budgetVehicles.push({
-          id: v.id,
-          brand: v.brand,
-          model: v.model,
-          carName: v.model.toLowerCase().startsWith(v.brand.toLowerCase())
-            ? v.model
-            : `${v.brand} ${v.model}`,
-          rating: 4.8,
-          starCount: '4.8',
-          category: 'Budget',
-          status: liveStatus,
-          image: mainPhoto,
-          gallery,
-          speed: '180 km/h',
-          seats: `${v.seatCapacity || 4} Seats`,
-          price: `₹${Math.round(v.pricePerKm || 14)}/km`,
-          pricePerKm: v.pricePerKm || 14.0,
-          fuelType: v.fuelType ? (v.fuelType.charAt(0) + v.fuelType.slice(1).toLowerCase()) : 'Petrol',
-          transmission: v.gearType ? (v.gearType.charAt(0) + v.gearType.slice(1).toLowerCase()) : 'Manual',
-          vehicleType: v.vehicleType ? (v.vehicleType.charAt(0) + v.vehicleType.slice(1).toLowerCase()) : 'Sedan',
-          acAvailable: v.acAvailable ?? true,
-          luggageCapacity: v.luggageCapacity ?? true,
-          vehicleNumber: v.vehicleNumber,
-          personaType: v.owner?.personaType || 'RENTAL',
-          createdAt: v.createdAt,
-        });
-      }
-    }
-
-    if (isBudgetOnly) {
-      return budgetVehicles;
-    }
-    if (isLuxuryOnly) {
-      return luxuryCars;
-    }
-    return [...luxuryCars, ...budgetVehicles];
+    const activeDriverRide = await prisma.ride.findFirst({
+      where: {
+        driverId: { in: driverIds },
+        status: { in: [...ACTIVE_RIDE_STATUSES] },
+      },
+      select: { id: true },
+    });
+    return Boolean(activeDriverRide);
   }
 
-  async getCarById(id: string) {
-    const eliteCar = await prisma.eliteCar.findUnique({
-      where: { id },
-    });
-    if (eliteCar) {
-      return {
-        ...eliteCar,
-        category: 'Luxury',
-        starCount: String(eliteCar.rating || '4.9'),
-        carName: eliteCar.model.toLowerCase().startsWith(eliteCar.brand.toLowerCase())
-          ? eliteCar.model
-          : `${eliteCar.brand} ${eliteCar.model}`,
-      };
+  private async formatVehicleAsEliteCar(v: any) {
+    const isLuxury = v.category === 'LUXURY' || v.vehicleType === 'LUXURY';
+    const isOnTrip = await this.checkDriverOnTrip(v);
+
+    let computedStatus: string;
+    if (v.status === 'MAINTENANCE') {
+      computedStatus = 'MAINTENANCE';
+    } else if (isOnTrip) {
+      computedStatus = isLuxury ? 'BOOKED' : 'ON_TRIP';
+    } else if (v.eliteStatus) {
+      computedStatus = v.eliteStatus.toUpperCase();
+    } else {
+      computedStatus = 'AVAILABLE';
     }
 
-    const v = await prisma.vehicle.findUnique({
-      where: { id },
-      include: {
-        photos: { orderBy: { createdAt: 'asc' } },
-        owner: { include: { user: true } },
-        assignedDriver: { include: { user: true } },
-        rides: {
-          where: {
-            status: { in: ['ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] },
-          },
-          take: 1,
-        },
-      },
-    });
+    const photos: Array<{ photoUrl: string; tag: string | null }> = Array.isArray(v.photos) ? v.photos : [];
+    const coverEntry = photos.find((p) => p.tag === 'cover') ?? photos[0];
+    const mainPhoto = coverEntry?.photoUrl || DEFAULT_COVER_IMAGE;
+    const extraGallery = photos.filter((p) => p.tag !== 'cover').map((p) => p.photoUrl);
+    const gallery = extraGallery.length > 0 ? extraGallery : [mainPhoto];
 
-    if (!v) return null;
-
-    const hasActiveRide = Array.isArray(v.rides) && v.rides.length > 0;
-    let isDriverOnTrip = false;
-    if (!hasActiveRide && v.ownerId) {
-      const activeOwnerRide = await prisma.ride.findFirst({
-        where: {
-          driverId: v.ownerId,
-          status: { in: ['ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] },
-        },
-      });
-      if (activeOwnerRide) isDriverOnTrip = true;
-    }
-    if (!hasActiveRide && !isDriverOnTrip && v.assignedDriver?.id) {
-      const activeAssignedRide = await prisma.ride.findFirst({
-        where: {
-          driverId: v.assignedDriver.id,
-          status: { in: ['ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] },
-        },
-      });
-      if (activeAssignedRide) isDriverOnTrip = true;
-    }
-
-    const isOnTrip = hasActiveRide || isDriverOnTrip;
-    const liveStatus = isOnTrip ? 'ON_TRIP' : 'AVAILABLE';
-    const mainPhoto = v.photos && v.photos.length > 0
-      ? v.photos[0].photoUrl
-      : 'assets/images/all_vehicles/Ferrari-4.jpg';
-    const gallery = v.photos && v.photos.length > 0
-      ? v.photos.map((p) => p.photoUrl)
-      : [mainPhoto];
+    const rating = typeof v.eliteRating === 'number' ? v.eliteRating : isLuxury ? 4.9 : 4.8;
+    const pricePerKm = typeof v.pricePerKm === 'number' && v.pricePerKm > 0 ? v.pricePerKm : isLuxury ? 80.0 : 14.0;
+    const brand = v.brand || 'Golden';
+    const model = v.model || 'Sedan';
 
     return {
       id: v.id,
-      brand: v.brand,
-      model: v.model,
-      carName: v.model.toLowerCase().startsWith(v.brand.toLowerCase())
-        ? v.model
-        : `${v.brand} ${v.model}`,
-      rating: 4.8,
-      starCount: '4.8',
-      category: 'Budget',
-      status: liveStatus,
+      vehicleNumber: v.vehicleNumber,
+      brand,
+      model,
+      carName: model.toLowerCase().startsWith(brand.toLowerCase()) ? model : `${brand} ${model}`,
+      rating,
+      starCount: String(rating),
+      category: formatCategoryLabel(v.category),
+      status: computedStatus,
       image: mainPhoto,
       gallery,
-      speed: '180 km/h',
+      speed: v.speed || (isLuxury ? '250 km/h' : '180 km/h'),
       seats: `${v.seatCapacity || 4} Seats`,
-      price: `₹${Math.round(v.pricePerKm || 14)}/km`,
-      pricePerKm: v.pricePerKm || 14.0,
-      fuelType: v.fuelType ? (v.fuelType.charAt(0) + v.fuelType.slice(1).toLowerCase()) : 'Petrol',
-      transmission: v.gearType ? (v.gearType.charAt(0) + v.gearType.slice(1).toLowerCase()) : 'Manual',
-      vehicleType: v.vehicleType ? (v.vehicleType.charAt(0) + v.vehicleType.slice(1).toLowerCase()) : 'Sedan',
+      features: v.features || (isLuxury ? 'Leather Seats, Air Suspension' : 'AC, Music System'),
+      price: `₹${Math.round(pricePerKm)}/km`,
+      pricePerKm,
+      fuelType: formatEnumLabel(v.fuelType, 'Petrol'),
+      transmission: formatEnumLabel(v.gearType, isLuxury ? 'Automatic' : 'Manual'),
+      vehicleType: formatEnumLabel(v.vehicleType, isLuxury ? 'Luxury' : 'Sedan'),
       acAvailable: v.acAvailable ?? true,
       luggageCapacity: v.luggageCapacity ?? true,
-      vehicleNumber: v.vehicleNumber,
-      personaType: v.owner?.personaType || 'RENTAL',
+      assignedDriver: v.assignedDriver?.id ?? null,
+      driverName: v.assignedDriver?.user?.name ?? null,
+      ownerId: v.ownerId ?? null,
+      personaType: v.owner?.personaType || (isLuxury ? 'FLEET' : 'RENTAL'),
       createdAt: v.createdAt,
     };
   }
 
-  async createCar(data: any) {
-    return prisma.eliteCar.create({
-      data: {
-        brand: data.brand || 'Elite',
-        model: data.model || 'Luxury Model',
-        category: data.category || 'Luxury',
-        rating: data.rating !== undefined ? Number(data.rating) : 4.9,
-        status: data.status || 'AVAILABLE',
-        image: data.image || 'assets/images/all_vehicles/Ferrari-4.jpg',
-        gallery: Array.isArray(data.gallery) && data.gallery.length > 0 ? data.gallery : [data.image || 'assets/images/all_vehicles/Ferrari-4.jpg'],
-        speed: data.speed || '250 km/h',
-        seats: data.seats ? String(data.seats) : '4 Seats',
-        features: data.features || 'Leather Seats, Air Suspension',
-        price: data.price || `₹${data.pricePerKm || 50}/km`,
-        pricePerKm: data.pricePerKm !== undefined ? Number(data.pricePerKm) : 50.0,
-        fuelType: data.fuelType || 'Petrol',
-        transmission: data.transmission || 'Automatic',
-      },
+  async getAllCars(brand?: string, status?: string, category?: string) {
+    const isBudgetOnly = Boolean(category && category.toLowerCase() === 'budget');
+    const isLuxuryOnly = Boolean(category && category.toLowerCase() === 'luxury');
+
+    if (!isBudgetOnly) {
+      const luxuryCount = await prisma.vehicle.count({
+        where: { OR: [{ category: 'LUXURY' }, { vehicleType: 'LUXURY' }] },
+      });
+      if (luxuryCount === 0) {
+        await this.seedDefaultCars();
+      }
+    }
+
+    const luxuryCondition = {
+      AND: [
+        { OR: [{ category: 'LUXURY' as VehicleCategory }, { vehicleType: 'LUXURY' as VehicleType }] },
+        { status: { in: ['VERIFIED' as VehicleStatus, 'MAINTENANCE' as VehicleStatus] } },
+      ],
+    };
+
+    const budgetCondition = {
+      AND: [
+        { status: 'VERIFIED' as VehicleStatus },
+        { NOT: { OR: [{ category: 'LUXURY' as VehicleCategory }, { vehicleType: 'LUXURY' as VehicleType }] } },
+        {
+          OR: [
+            { owner: { personaType: { in: ['RENTAL' as const, 'OWN_VEHICLE' as const] } } },
+            { ownerId: { not: null } },
+          ],
+        },
+      ],
+    };
+
+    const where: any = isLuxuryOnly
+      ? luxuryCondition
+      : isBudgetOnly
+      ? budgetCondition
+      : { OR: [luxuryCondition, budgetCondition] };
+
+    if (brand && brand !== 'All' && brand !== 'All Brands') {
+      where.brand = { contains: brand, mode: 'insensitive' };
+    }
+
+    const vehicles = await prisma.vehicle.findMany({
+      where,
+      include: VEHICLE_ELITE_INCLUDE,
+      orderBy: { createdAt: 'desc' },
     });
+
+    const formatted = [];
+    for (const v of vehicles) {
+      const car = await this.formatVehicleAsEliteCar(v);
+      if (status && status !== 'All') {
+        const reqStatus = status.toUpperCase();
+        const curStatus = car.status.toUpperCase();
+        if (reqStatus === 'ON_TRIP' || reqStatus === 'BOOKED') {
+          if (curStatus !== 'ON_TRIP' && curStatus !== 'BOOKED') continue;
+        } else if (curStatus !== reqStatus) {
+          continue;
+        }
+      }
+      formatted.push(car);
+    }
+
+    // Keep Luxury cars ordered ahead of Budget partner vehicles when fetching All
+    if (!isBudgetOnly && !isLuxuryOnly) {
+      formatted.sort((a, b) => {
+        const aLux = a.category === 'Luxury' ? 0 : 1;
+        const bLux = b.category === 'Luxury' ? 0 : 1;
+        return aLux - bLux;
+      });
+    }
+
+    return formatted;
+  }
+
+  async getCarById(id: string) {
+    const v = await prisma.vehicle.findFirst({
+      where: {
+        OR: [{ id }, { sourceEliteCarId: id }],
+      },
+      include: VEHICLE_ELITE_INCLUDE,
+    });
+
+    if (!v) return null;
+    return this.formatVehicleAsEliteCar(v);
+  }
+
+  async createCar(data: any) {
+    const category = mapVehicleCategory(data.category);
+    const vehicleType = mapVehicleType(data.vehicleType, category);
+    const { vehicleStatus, eliteStatus, isOnline } = parseStatusMapping(data.status);
+
+    const requestedPlate = String(data.vehicleNumber || '').trim().toUpperCase();
+    const vehicleNumber = requestedPlate || (await generateUniqueElitePlate());
+
+    const coverUrl = String(data.image || '').trim() || DEFAULT_COVER_IMAGE;
+    const rawGallery: string[] = Array.isArray(data.gallery) && data.gallery.length > 0
+      ? data.gallery.map((g: unknown) => String(g || '').trim()).filter(Boolean)
+      : [coverUrl];
+
+    const created = await prisma.$transaction(async (tx) => {
+      const vehicle = await tx.vehicle.create({
+        data: {
+          vehicleNumber,
+          brand: String(data.brand || 'ELITE').trim(),
+          model: String(data.model || 'Luxury Model').trim(),
+          year: Number(data.year) || new Date().getFullYear(),
+          vehicleType,
+          category,
+          fuelType: mapFuelType(data.fuelType),
+          gearType: mapGearType(data.transmission || data.gearType),
+          seatCapacity: parseSeatCount(data.seats),
+          pricePerKm: data.pricePerKm !== undefined ? Number(data.pricePerKm) || 80.0 : 80.0,
+          basePrice: data.basePrice !== undefined ? Number(data.basePrice) || 0.0 : 0.0,
+          acAvailable: data.acAvailable ?? true,
+          luggageCapacity: data.luggageCapacity ?? true,
+          status: vehicleStatus,
+          eliteStatus,
+          isOnline,
+          speed: data.speed || '250 km/h',
+          features: data.features || 'Leather Seats, Air Suspension',
+          eliteRating: data.rating !== undefined ? Number(data.rating) : 4.9,
+          ownerId: data.ownerId || null,
+        },
+      });
+
+      await tx.vehiclePhoto.create({
+        data: { vehicleId: vehicle.id, photoUrl: coverUrl, tag: 'cover' },
+      });
+
+      for (const gUrl of rawGallery) {
+        await tx.vehiclePhoto.create({
+          data: { vehicleId: vehicle.id, photoUrl: gUrl, tag: 'gallery' },
+        });
+      }
+
+      return vehicle;
+    });
+
+    return this.getCarById(created.id);
   }
 
   async updateCar(id: string, data: any) {
-    return prisma.eliteCar.update({
-      where: { id },
-      data: {
-        ...(data.brand !== undefined && { brand: data.brand }),
-        ...(data.model !== undefined && { model: data.model }),
-        ...(data.category !== undefined && { category: data.category }),
-        ...(data.rating !== undefined && { rating: Number(data.rating) }),
-        ...(data.status !== undefined && { status: data.status }),
-        ...(data.image !== undefined && { image: data.image }),
-        ...(data.gallery !== undefined && { gallery: Array.isArray(data.gallery) ? data.gallery : [] }),
-        ...(data.speed !== undefined && { speed: data.speed }),
-        ...(data.seats !== undefined && { seats: String(data.seats) }),
-        ...(data.features !== undefined && { features: data.features }),
-        ...(data.price !== undefined && { price: data.price }),
-        ...(data.pricePerKm !== undefined && { pricePerKm: Number(data.pricePerKm) }),
-        ...(data.fuelType !== undefined && { fuelType: data.fuelType }),
-        ...(data.transmission !== undefined && { transmission: data.transmission }),
-      },
+    const existing = await prisma.vehicle.findFirst({
+      where: { OR: [{ id }, { sourceEliteCarId: id }] },
     });
+    if (!existing) {
+      throw new Error('Elite car not found');
+    }
+
+    const updatePayload: any = {};
+    if (data.brand !== undefined) updatePayload.brand = String(data.brand).trim();
+    if (data.model !== undefined) updatePayload.model = String(data.model).trim();
+    if (data.vehicleNumber !== undefined && String(data.vehicleNumber).trim().length > 0) {
+      updatePayload.vehicleNumber = String(data.vehicleNumber).trim().toUpperCase();
+    }
+    if (data.category !== undefined) {
+      updatePayload.category = mapVehicleCategory(data.category);
+    }
+    if (data.vehicleType !== undefined) {
+      updatePayload.vehicleType = mapVehicleType(data.vehicleType, updatePayload.category ?? existing.category);
+    }
+    if (data.rating !== undefined) updatePayload.eliteRating = Number(data.rating);
+    if (data.speed !== undefined) updatePayload.speed = data.speed;
+    if (data.features !== undefined) updatePayload.features = data.features;
+    if (data.seats !== undefined) updatePayload.seatCapacity = parseSeatCount(data.seats);
+    if (data.pricePerKm !== undefined) updatePayload.pricePerKm = Number(data.pricePerKm);
+    if (data.fuelType !== undefined) updatePayload.fuelType = mapFuelType(data.fuelType);
+    if (data.transmission !== undefined || data.gearType !== undefined) {
+      updatePayload.gearType = mapGearType(data.transmission ?? data.gearType);
+    }
+    if (data.status !== undefined) {
+      const parsed = parseStatusMapping(data.status);
+      updatePayload.status = parsed.vehicleStatus;
+      updatePayload.eliteStatus = parsed.eliteStatus;
+      updatePayload.isOnline = parsed.isOnline;
+    }
+
+    const hasPhotoUpdates = data.image !== undefined || Array.isArray(data.gallery);
+
+    await prisma.$transaction(async (tx) => {
+      await tx.vehicle.update({
+        where: { id: existing.id },
+        data: updatePayload,
+      });
+
+      if (hasPhotoUpdates) {
+        const existingPhotos = await tx.vehiclePhoto.findMany({
+          where: { vehicleId: existing.id },
+          orderBy: { createdAt: 'asc' },
+        });
+        const prevCover = existingPhotos.find((p) => p.tag === 'cover')?.photoUrl ?? existingPhotos[0]?.photoUrl;
+        const prevGallery = existingPhotos.filter((p) => p.tag !== 'cover').map((p) => p.photoUrl);
+
+        const nextCover = data.image !== undefined
+          ? String(data.image || '').trim() || DEFAULT_COVER_IMAGE
+          : prevCover || DEFAULT_COVER_IMAGE;
+        const nextGallery = Array.isArray(data.gallery) && data.gallery.length > 0
+          ? data.gallery.map((g: unknown) => String(g || '').trim()).filter(Boolean)
+          : prevGallery.length > 0
+          ? prevGallery
+          : [nextCover];
+
+        await tx.vehiclePhoto.deleteMany({ where: { vehicleId: existing.id } });
+        await tx.vehiclePhoto.create({
+          data: { vehicleId: existing.id, photoUrl: nextCover, tag: 'cover' },
+        });
+        for (const gUrl of nextGallery) {
+          await tx.vehiclePhoto.create({
+            data: { vehicleId: existing.id, photoUrl: gUrl, tag: 'gallery' },
+          });
+        }
+      }
+    });
+
+    return this.getCarById(existing.id);
   }
 
   async deleteCar(id: string) {
-    return prisma.eliteCar.delete({
-      where: { id },
+    const existing = await prisma.vehicle.findFirst({
+      where: { OR: [{ id }, { sourceEliteCarId: id }] },
+      include: {
+        assignedDriver: { select: { id: true } },
+        rides: { select: { id: true }, take: 1 },
+      },
     });
+    if (!existing) {
+      throw new Error('Elite car not found');
+    }
+
+    if (existing.rides.length > 0) {
+      throw new Error('Cannot delete a vehicle with ride history; set status to MAINTENANCE instead');
+    }
+
+    await prisma.$transaction(async (tx) => {
+      if (existing.assignedDriver?.id) {
+        await tx.driverProfile.update({
+          where: { id: existing.assignedDriver.id },
+          data: { assignedVehicleId: null, isOnline: false, shiftStatus: 'OFF_SHIFT' },
+        });
+      }
+      await tx.vehicle.delete({ where: { id: existing.id } });
+    });
+
+    return { id: existing.id, deleted: true };
   }
 
   private async seedDefaultCars() {
     const defaultCars = [
       {
+        vehicleNumber: 'ELITE-001',
         brand: 'FERRARI',
         model: 'Ferrari F8 Tributo',
         rating: 4.9,
@@ -300,12 +442,12 @@ export class EliteCarsService {
         speed: '340 km/h',
         seats: '2 Seats',
         features: 'Launch Control, Sport Exhaust',
-        price: '₹120/km',
         pricePerKm: 120.0,
         fuelType: 'Petrol',
         transmission: 'Automatic',
       },
       {
+        vehicleNumber: 'ELITE-002',
         brand: 'ROLLS ROYCE',
         model: 'Rolls Royce Ghost',
         rating: 4.9,
@@ -320,12 +462,12 @@ export class EliteCarsService {
         speed: '250 km/h',
         seats: '4 Seats',
         features: 'Starlight Headliner, Massage Seats',
-        price: '₹150/km',
         pricePerKm: 150.0,
         fuelType: 'Petrol',
         transmission: 'Automatic',
       },
       {
+        vehicleNumber: 'ELITE-003',
         brand: 'BMW',
         model: 'BMW X5 M',
         rating: 4.8,
@@ -340,12 +482,12 @@ export class EliteCarsService {
         speed: '290 km/h',
         seats: '5 Seats',
         features: 'WiFi Available, Panoramic Sunroof',
-        price: '₹80/km',
         pricePerKm: 80.0,
         fuelType: 'Petrol',
         transmission: 'Automatic',
       },
       {
+        vehicleNumber: 'ELITE-004',
         brand: 'AUDI',
         model: 'Audi Q7',
         rating: 4.7,
@@ -360,7 +502,6 @@ export class EliteCarsService {
         speed: '250 km/h',
         seats: '7 Seats',
         features: 'Panoramic Sunroof, 360 Camera',
-        price: '₹60/km',
         pricePerKm: 60.0,
         fuelType: 'Diesel',
         transmission: 'Automatic',
@@ -368,7 +509,10 @@ export class EliteCarsService {
     ];
 
     for (const car of defaultCars) {
-      await prisma.eliteCar.create({ data: car });
+      const exists = await prisma.vehicle.findUnique({ where: { vehicleNumber: car.vehicleNumber } });
+      if (!exists) {
+        await this.createCar(car);
+      }
     }
   }
 }

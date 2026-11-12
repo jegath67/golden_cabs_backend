@@ -101,6 +101,17 @@ enum PaymentStatus {
   REFUNDED
 }
 
+enum GatewayPaymentStatus {
+  CREATED
+  PENDING
+  AUTHORIZED
+  CAPTURED
+  PAID
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
 enum DiscountType {
   FLAT
   PERCENTAGE
@@ -159,6 +170,7 @@ model User {
   refundRequests    RefundRequest[]
   customerWallet    CustomerWallet?
   reviewsAsCustomer Review[]        @relation("CustomerReviews")
+  paymentTransactions PaymentTransaction[] @relation("CustomerPaymentTransactions")
 }
 
 model CustomerProfile {
@@ -302,6 +314,11 @@ model Vehicle {
   insuranceDoc    String?
   status          VehicleStatus   @default(PENDING)
   isOnline        Boolean         @default(false)
+  speed           String?
+  features        String?
+  eliteRating     Float?          @default(4.9)
+  eliteStatus     String?
+  sourceEliteCarId String?        @unique
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
 
@@ -367,23 +384,28 @@ model Ride {
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
 
-  fareBreakdown  FareBreakdown?
-  refundRequest  RefundRequest?
-  review         Review?
+  fareBreakdown       FareBreakdown?
+  refundRequest       RefundRequest?
+  review              Review?
+  paymentTransactions PaymentTransaction[]
 }
 
 model FareBreakdown {
-  id             String   @id @default(uuid())
-  rideId         String   @unique
-  ride           Ride     @relation(fields: [rideId], references: [id], onDelete: Cascade)
-  distanceKm     Float
-  pricePerKm     Float
-  baseFare       Float    @default(0.0)
-  tollCharge     Float    @default(0.0)
-  permitCharge   Float    @default(0.0)
-  driverBata     Float    @default(0.0)
-  discountAmount Float    @default(0.0)
-  totalFare      Float
+  id                String   @id @default(uuid())
+  rideId            String   @unique
+  ride              Ride     @relation(fields: [rideId], references: [id], onDelete: Cascade)
+  distanceKm        Float
+  pricePerKm        Float
+  baseFare          Float    @default(0.0)
+  tollCharge        Float    @default(0.0)
+  permitCharge      Float    @default(0.0)
+  driverBata        Float    @default(0.0)
+  discountAmount    Float    @default(0.0)
+  totalFare         Float
+  commissionPercent Float?
+  commissionAmount  Float?
+  driverAmount      Float?
+  pricingSlabId     String?
 }
 
 model Coupon {
@@ -412,6 +434,7 @@ model Wallet {
   balance            Float               @default(0.0)
   lifetimeEarnings   Float               @default(0.0)
   pendingWithdrawals Float               @default(0.0)
+  bankName           String?
   bankAccountNumber  String?
   bankIfsc           String?
   bankHolderName     String?
@@ -422,20 +445,24 @@ model Wallet {
 }
 
 model WalletTransaction {
-  id              String         @id @default(uuid())
-  walletId        String
-  wallet          Wallet         @relation(fields: [walletId], references: [id], onDelete: Cascade)
-  amount          Float
-  type            WalletTxType
-  status          WalletTxStatus @default(PENDING)
-  description     String
-  referenceRideId String?
-  utrNumber       String?
-  rejectionReason String?
-  previousBalance Float?
-  newBalance      Float?
-  paidAt          DateTime?
-  createdAt       DateTime       @default(now())
+  id                String         @id @default(uuid())
+  walletId          String
+  wallet            Wallet         @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  amount            Float
+  type              WalletTxType
+  status            WalletTxStatus @default(PENDING)
+  description       String
+  referenceRideId   String?
+  utrNumber         String?
+  rejectionReason   String?
+  previousBalance   Float?
+  newBalance        Float?
+  bankName          String?
+  bankAccountNumber String?
+  bankIfsc          String?
+  bankHolderName    String?
+  paidAt            DateTime?
+  createdAt         DateTime       @default(now())
 }
 
 model RefundRequest {
@@ -450,6 +477,57 @@ model RefundRequest {
   adminRemarks String?
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
+}
+
+model PaymentTransaction {
+  id                  String               @id @default(uuid())
+  rideId              String
+  ride                Ride                 @relation(fields: [rideId], references: [id], onDelete: Cascade)
+  customerId          String
+  customer            User                 @relation("CustomerPaymentTransactions", fields: [customerId], references: [id])
+  provider            String               @default("RAZORPAY")
+  razorpayOrderId     String               @unique
+  razorpayPaymentId   String?              @unique
+  razorpaySignature   String?
+  receipt             String               @unique
+  amountPaise         Int
+  amountInr           Float
+  currency            String               @default("INR")
+  paymentMethod       PaymentMethod        @default(UPI)
+  gatewayMethod       String?
+  status              GatewayPaymentStatus @default(CREATED)
+  verificationStatus  String               @default("UNVERIFIED")
+  failureReason       String?
+  gatewayEventIds     Json?
+  refundedAmountPaise Int                  @default(0)
+  verifiedAt          DateTime?
+  capturedAt          DateTime?
+  failedAt            DateTime?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  webhookEvents       GatewayWebhookEvent[]
+
+  @@index([rideId, status])
+  @@index([customerId, createdAt])
+}
+
+model GatewayWebhookEvent {
+  id                   String              @id @default(uuid())
+  provider             String              @default("RAZORPAY")
+  eventId              String              @unique
+  eventType            String
+  razorpayOrderId      String?
+  razorpayPaymentId    String?
+  paymentTransactionId String?
+  paymentTransaction   PaymentTransaction? @relation(fields: [paymentTransactionId], references: [id], onDelete: SetNull)
+  payload              Json?
+  processed            Boolean             @default(true)
+  processedAt          DateTime            @default(now())
+  createdAt            DateTime            @default(now())
+
+  @@index([razorpayOrderId])
+  @@index([razorpayPaymentId])
 }
 
 // -------------------------------------------------------------
@@ -640,6 +718,7 @@ model PricingSlab {
   id                  String   @id @default(uuid())
   vehicleType         String   // Hatchback, Sedan, SUV, Premium
   rideType            String   // Local Ride, Local Round Trip, Outstation One Way, Outstation Round Trip
+  commissionPercent   Float    @default(20.0)
   baseFare            Float    @default(0.0)
   includedKm          Float    @default(0.0)
   extraKmCharge       Float    @default(0.0)

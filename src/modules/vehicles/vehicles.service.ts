@@ -58,7 +58,7 @@ export class VehiclesService {
             user: { select: { name: true, phone: true } },
           },
         },
-        photos: true,
+        photos: { orderBy: { createdAt: 'asc' } },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -79,7 +79,7 @@ export class VehiclesService {
             user: { select: { name: true, phone: true } },
           },
         },
-        photos: true,
+        photos: { orderBy: { createdAt: 'asc' } },
       },
     });
   }
@@ -149,7 +149,7 @@ export class VehiclesService {
           : {}),
       },
       include: {
-        photos: true,
+        photos: { orderBy: { createdAt: 'asc' } },
         assignedHub: true,
         owner: { select: { userId: true, approvalStatus: true, user: { select: { name: true, phone: true } } } },
       },

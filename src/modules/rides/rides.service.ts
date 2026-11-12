@@ -6,6 +6,13 @@ import { locationCacheService } from '../drivers/location-cache.service';
 import { vehiclesService } from '../vehicles/vehicles.service';
 import { TripStatus } from '../../generated/prisma/client';
 import { standardizeTripType } from '../../utils/trip-type.helper';
+import {
+  pricingSlabsService,
+  computeCommissionSplit,
+  normalizeCommissionPercent,
+  getLedgerTxMapForRides,
+  resolveDriverRideBreakdown,
+} from '../pricing-slabs/pricing-slabs.service';
 
 /**
  * Permitted window (in minutes) before scheduled pickup time within which a driver can initiate trip start.
@@ -19,7 +26,16 @@ export interface EstimateFareInput {
   dropLat: number;
   dropLng: number;
   tripType?: 'DAILY' | 'RENTAL' | 'OUTSTATION' | 'ONE_WAY' | 'ROUND_TRIP';
-  category?: 'BUDGET' | 'PREMIUM' | 'LUXURY';
+  customTripType?: string;
+  category?: 'BUDGET' | 'PREMIUM' | 'LUXURY' | 'ELITE';
+  vehicleType?: string;
+  carName?: string;
+  requestedVehicle?: string;
+  requestedSeats?: string;
+  seatCapacity?: number;
+  isElite?: boolean;
+  zone?: string;
+  tollCharge?: number;
 }
 
 /**
@@ -85,47 +101,50 @@ export class RidesService {
    * Estimate ride fare
    */
   async estimateFare(input: EstimateFareInput & { distanceKm?: number }) {
-    const isRound = input.tripType === 'ROUND_TRIP';
-    let distanceKm = typeof input.distanceKm === 'number' && input.distanceKm > 0
-      ? input.distanceKm
-      : this.calculateDistanceKm(
-          input.pickupLat,
-          input.pickupLng,
-          input.dropLat,
-          input.dropLng
-        );
+    const isRound =
+      input.tripType === 'ROUND_TRIP' ||
+      (input.customTripType || '').toLowerCase().includes('round');
+    let distanceKm =
+      typeof input.distanceKm === 'number' && input.distanceKm > 0
+        ? input.distanceKm
+        : this.calculateDistanceKm(
+            input.pickupLat,
+            input.pickupLng,
+            input.dropLat,
+            input.dropLng
+          );
 
     // If Haversine fallback was used and it's a round trip, double it
     if (!input.distanceKm && isRound) {
       distanceKm = Math.round(distanceKm * 2 * 10) / 10;
     }
 
-    // Rate configurations based on vehicle category
-    let ratePerKm = 14.0;
-    let baseFare = 50.0;
-
-    if (input.category === 'PREMIUM') {
-      ratePerKm = 18.0;
-      baseFare = 80.0;
-    } else if (input.category === 'LUXURY') {
-      ratePerKm = 24.0;
-      baseFare = 150.0;
-    }
-
-    let driverBata = 0;
-    if (input.tripType === 'OUTSTATION' || input.tripType === 'ROUND_TRIP') {
-      driverBata = 300.0;
-    }
-
-    const calculatedFare = baseFare + distanceKm * ratePerKm + driverBata;
-    const totalFare = Math.round(calculatedFare);
+    const slabFare = await pricingSlabsService.calculateFareFromActiveSlab({
+      distanceKm,
+      vehicleType: input.vehicleType,
+      carName: input.carName,
+      requestedVehicle: input.requestedVehicle,
+      requestedSeats: input.requestedSeats,
+      seatCapacity: input.seatCapacity,
+      category: input.category,
+      isElite: input.isElite,
+      customTripType: input.customTripType,
+      tripType: input.tripType,
+      zone: input.zone,
+      tollCharge: input.tollCharge,
+    });
 
     return {
-      distanceKm,
-      pricePerKm: ratePerKm,
-      baseFare,
-      driverBata,
-      estimatedFare: totalFare,
+      distanceKm: slabFare.distanceKm,
+      includedKm: slabFare.includedKm,
+      pricePerKm: slabFare.pricePerKm,
+      baseFare: slabFare.baseFare,
+      distanceCharge: slabFare.distanceCharge,
+      tollCharge: slabFare.tollCharge,
+      driverBata: slabFare.driverBata,
+      estimatedFare: slabFare.estimatedFare,
+      pricingSlabId: slabFare.pricingSlabId,
+      commissionPercent: slabFare.commissionPercent,
     };
   }
 
@@ -145,18 +164,29 @@ export class RidesService {
     tripType?: 'DAILY' | 'RENTAL' | 'OUTSTATION' | 'ONE_WAY' | 'ROUND_TRIP';
     customTripType?: string;
     isElite?: boolean;
-    category?: 'BUDGET' | 'PREMIUM' | 'LUXURY';
+    category?: 'BUDGET' | 'PREMIUM' | 'LUXURY' | 'ELITE';
     paymentMethod?: 'CASH' | 'UPI' | 'CARD' | 'WALLET';
     couponCode?: string;
     scheduledAt?: string;
     requestedSeats?: string;
     seatCapacity?: number;
     requestedVehicle?: string;
+    vehicleType?: string;
+    zone?: string;
     carName?: string;
+    tollCharge?: number;
     additionalStops?: string[];
     stops?: any;
   }) {
     const clientDist = typeof data.distanceKm === 'number' && data.distanceKm > 0 ? Number(data.distanceKm.toFixed(1)) : undefined;
+    const seatCapPre = data.seatCapacity || (data.requestedSeats?.includes('6') || data.requestedVehicle?.includes('6') ? 6 : 4);
+    const reqVehiclePre = data.requestedVehicle || data.requestedSeats || data.carName || (seatCapPre === 6 ? '6 Seater Cab' : '4 Seater Cab');
+    const isElitePre = !!(
+      data.isElite === true ||
+      String(data.category).toUpperCase() === 'ELITE' ||
+      String(reqVehiclePre).toLowerCase().includes('elite') ||
+      String(data.carName).toLowerCase().includes('elite')
+    );
 
     const fareEstimate = await this.estimateFare({
       pickupLat: data.pickupLat,
@@ -164,7 +194,16 @@ export class RidesService {
       dropLat: data.dropLat,
       dropLng: data.dropLng,
       tripType: data.tripType,
+      customTripType: data.customTripType,
       category: data.category,
+      vehicleType: data.vehicleType,
+      carName: data.carName,
+      requestedVehicle: reqVehiclePre,
+      requestedSeats: data.requestedSeats,
+      seatCapacity: seatCapPre,
+      isElite: isElitePre,
+      zone: data.zone,
+      tollCharge: data.tollCharge,
       distanceKm: clientDist,
     });
 
@@ -233,6 +272,12 @@ export class RidesService {
       String(data.carName).toLowerCase().includes('elite')
     );
 
+    // Snapshot the active PricingSlab commission % determined at ride creation so future slab updates never mutate this ride.
+    const initialCommissionSplit = computeCommissionSplit(
+      finalEstimatedFare + discountAmount,
+      fareEstimate.commissionPercent
+    );
+
     const ride = await prisma.$transaction(async (tx) => {
       if (data.couponCode) {
         const { couponsService } = await import('../coupons/coupons.service');
@@ -261,6 +306,7 @@ export class RidesService {
             ...(data.couponCode
               ? { couponCode: data.couponCode.trim().toUpperCase(), couponRestored: false }
               : {}),
+            ...(data.zone ? { zone: data.zone } : {}),
             scheduledAt: validatedScheduledAt,
             scheduledDisplay: scheduledDisplayStr,
             isScheduled: isScheduledBooking,
@@ -276,9 +322,14 @@ export class RidesService {
               distanceKm: finalDistanceKm,
               pricePerKm: fareEstimate.pricePerKm,
               baseFare: fareEstimate.baseFare,
+              tollCharge: fareEstimate.tollCharge || 0,
               driverBata: fareEstimate.driverBata,
               discountAmount,
               totalFare: finalEstimatedFare,
+              commissionPercent: initialCommissionSplit.commissionPercent,
+              commissionAmount: initialCommissionSplit.commissionAmount,
+              driverAmount: initialCommissionSplit.driverAmount,
+              pricingSlabId: fareEstimate.pricingSlabId,
             },
           },
         },
@@ -723,97 +774,52 @@ export class RidesService {
         },
       });
 
-      // Driver settlement: Uber/Rapido style
-      // Handle Cash vs UPI/Online settlements with idempotency protection
-      let driverWallet = ride.driver?.wallet;
-      if (!driverWallet && ride.driverId) {
-        driverWallet = await tx.wallet.findUnique({
-          where: { driverId: ride.driverId },
-        });
-        if (!driverWallet) {
-          driverWallet = await tx.wallet.create({
-            data: {
-              driverId: ride.driverId,
-              balance: 0.0,
-              lifetimeEarnings: 0.0,
-              pendingWithdrawals: 0.0,
-            },
-          });
-        }
-      }
+      // Use frozen ride-creation commission % when available; fallback to global setting only for pre-migration rides.
+      const fallbackGlobalPercent = await platformSettingsService.getCommissionPercent();
+      const appliedCommissionPercent =
+        ride.fareBreakdown?.commissionPercent != null
+          ? normalizeCommissionPercent(ride.fareBreakdown.commissionPercent, fallbackGlobalPercent)
+          : normalizeCommissionPercent(fallbackGlobalPercent, 20.0);
+      const {
+        commissionAmount: companyCommission,
+        driverAmount: driverNetEarnings,
+      } = computeCommissionSplit(grossTripFare, appliedCommissionPercent);
 
-      if (driverWallet) {
-        const existingTx = await tx.walletTransaction.findFirst({
-          where: { referenceRideId: ride.id },
-        });
+      // Persist exact settled commission & driver net amounts on FareBreakdown atomically.
+      const savedFareBreakdown = await tx.fareBreakdown.upsert({
+        where: { rideId: ride.id },
+        update: {
+          totalFare: finalFare,
+          commissionPercent: appliedCommissionPercent,
+          commissionAmount: companyCommission,
+          driverAmount: driverNetEarnings,
+        },
+        create: {
+          rideId: ride.id,
+          distanceKm: ride.distanceKm || 0,
+          pricePerKm: 0,
+          baseFare: finalFare,
+          discountAmount,
+          totalFare: finalFare,
+          commissionPercent: appliedCommissionPercent,
+          commissionAmount: companyCommission,
+          driverAmount: driverNetEarnings,
+        },
+      });
+      updated.fareBreakdown = savedFareBreakdown;
 
-        if (!existingTx) {
-          const commissionRate = await platformSettingsService.getCommissionRate();
-          const companyCommission = Math.round(grossTripFare * commissionRate * 100) / 100;
-          const driverNetEarnings = Math.round((grossTripFare - companyCommission) * 100) / 100;
-          const currentBalance = driverWallet.balance;
-
-          if (isCash) {
-            // Customer Cash Payment:
-            // Driver collects full customer payment directly.
-            // Deduct ONLY company commission from wallet balance as company dues (can become negative).
-            // Driver earned net earnings in cash, so lifetimeEarnings reflects real net earnings.
-            const newBalance = Math.round((currentBalance - companyCommission) * 100) / 100;
-            await tx.wallet.update({
-              where: { id: driverWallet.id },
-              data: {
-                balance: newBalance,
-                lifetimeEarnings: { increment: driverNetEarnings },
-              },
-            });
-
-            await tx.walletTransaction.create({
-              data: {
-                walletId: driverWallet.id,
-                amount: companyCommission,
-                type: 'COMMISSION',
-                status: 'COMPLETED',
-                previousBalance: currentBalance,
-                newBalance: newBalance,
-                description: `Company commission due for cash trip ${ride.bookingCode} (Collected: ₹${customerPayable}, Commission: ₹${companyCommission})`,
-                referenceRideId: ride.id,
-              },
-            });
-          } else if (isAlreadyPaid) {
-            // Customer UPI / Online Payment (Confirmed):
-            // Company receives full online payment.
-            // Driver net earnings credited to wallet balance (automatically offsetting any negative dues).
-            const newBalance = Math.round((currentBalance + driverNetEarnings) * 100) / 100;
-            await tx.wallet.update({
-              where: { id: driverWallet.id },
-              data: {
-                balance: newBalance,
-                lifetimeEarnings: { increment: driverNetEarnings },
-              },
-            });
-
-            await tx.walletTransaction.create({
-              data: {
-                walletId: driverWallet.id,
-                amount: driverNetEarnings,
-                type: 'EARNING',
-                status: 'COMPLETED',
-                previousBalance: currentBalance,
-                newBalance: newBalance,
-                description: `Earnings for trip ${ride.bookingCode} (Online: ₹${customerPayable}, Commission: ₹${companyCommission})`,
-                referenceRideId: ride.id,
-              },
-            });
-          } else {
-            // Unpaid Online Ride:
-            // Ride is completed, but customer has NOT paid online yet.
-            // DO NOT credit driver wallet with unreceived funds.
-            console.log(
-              `[RideService] Ride ${ride.bookingCode} completed with pending online payment (Method: ${ride.paymentMethod}). Driver wallet not credited until payment verification.`
-            );
-          }
-        }
-      }
+      // Settle driver wallet atomically & idempotently (supports both CASH dues and verified PAID UPI/Online credits)
+      await this.settleCompletedRideWalletInTx(tx, {
+        rideId: ride.id,
+        bookingCode: ride.bookingCode,
+        driverId: ride.driverId,
+        paymentMethod: effectivePaymentMethod,
+        paymentStatus: finalPaymentStatus,
+        customerPayable,
+        companyCommission,
+        driverNetEarnings,
+        appliedCommissionPercent,
+      });
 
       // Update customer and driver total rides
       await tx.customerProfile.updateMany({
@@ -856,9 +862,13 @@ export class RidesService {
       const grossFare = (updatedRide.fareBreakdown?.totalFare || 0) + (updatedRide.fareBreakdown?.discountAmount || 0);
       const isCash = updatedRide.paymentMethod === 'CASH';
       const isPaid = updatedRide.paymentStatus === 'PAID';
-      const commissionRate = await platformSettingsService.getCommissionRate();
-      const commission = Math.round(grossFare * commissionRate * 100) / 100;
-      const driverPay = Math.round((grossFare - commission) * 100) / 100;
+      const fallbackPercent = await platformSettingsService.getCommissionPercent();
+      const split = computeCommissionSplit(
+        grossFare,
+        updatedRide.fareBreakdown?.commissionPercent ?? fallbackPercent
+      );
+      const commission = updatedRide.fareBreakdown?.commissionAmount ?? split.commissionAmount;
+      const driverPay = updatedRide.fareBreakdown?.driverAmount ?? split.driverAmount;
 
       if (isCash) {
         notificationsService.sendToUser({
@@ -898,6 +908,128 @@ export class RidesService {
     return updatedRide;
   }
 
+  /**
+   * Idempotent, row-locked wallet settlement helper shared by completeRide & delayed UPI verification.
+   */
+  async settleCompletedRideWalletInTx(
+    tx: any,
+    params: {
+      rideId: string;
+      bookingCode: string;
+      driverId?: string | null;
+      paymentMethod: string;
+      paymentStatus: string;
+      customerPayable: number;
+      companyCommission: number;
+      driverNetEarnings: number;
+      appliedCommissionPercent: number;
+    }
+  ): Promise<{ settled: boolean; type?: 'COMMISSION' | 'EARNING'; driverNetEarnings: number; companyCommission: number }> {
+    const {
+      rideId,
+      bookingCode,
+      driverId,
+      paymentMethod,
+      paymentStatus,
+      customerPayable,
+      companyCommission,
+      driverNetEarnings,
+      appliedCommissionPercent,
+    } = params;
+
+    if (!driverId) {
+      return { settled: false, driverNetEarnings, companyCommission };
+    }
+
+    const isCash = paymentMethod === 'CASH';
+    const isPaid = paymentStatus === 'PAID';
+    if (!isCash && !isPaid) {
+      console.log(
+        `[RideService] Ride ${bookingCode} completed with pending online payment (Method: ${paymentMethod}). Driver wallet not credited until payment verification.`
+      );
+      return { settled: false, driverNetEarnings, companyCommission };
+    }
+
+    // Ensure wallet row exists, then acquire exclusive row lock on Wallet
+    let wallet = await tx.wallet.findUnique({ where: { driverId } });
+    if (!wallet) {
+      wallet = await tx.wallet.create({
+        data: {
+          driverId,
+          balance: 0.0,
+          lifetimeEarnings: 0.0,
+          pendingWithdrawals: 0.0,
+        },
+      });
+    }
+    const lockedWallets = await tx.$queryRaw<any[]>`
+      SELECT * FROM "Wallet" WHERE "id" = ${wallet.id} FOR UPDATE
+    `;
+    const liveWallet = lockedWallets[0] || wallet;
+
+    // Strict idempotency: never create duplicate settlement entry for a ride
+    const existingSettlement = await tx.walletTransaction.findFirst({
+      where: {
+        referenceRideId: rideId,
+        type: { in: ['COMMISSION', 'EARNING'] },
+      },
+    });
+    if (existingSettlement) {
+      return { settled: false, driverNetEarnings, companyCommission };
+    }
+
+    const currentBalance = Math.round(Number(liveWallet.balance) * 100) / 100;
+
+    if (isCash) {
+      const newBalance = Math.round((currentBalance - companyCommission) * 100) / 100;
+      await tx.wallet.update({
+        where: { id: liveWallet.id },
+        data: {
+          balance: newBalance,
+          lifetimeEarnings: Math.round((Number(liveWallet.lifetimeEarnings) + driverNetEarnings) * 100) / 100,
+        },
+      });
+
+      await tx.walletTransaction.create({
+        data: {
+          walletId: liveWallet.id,
+          amount: companyCommission,
+          type: 'COMMISSION',
+          status: 'COMPLETED',
+          previousBalance: currentBalance,
+          newBalance,
+          description: `Company commission due for cash trip ${bookingCode} (Collected: ₹${customerPayable}, Commission: ₹${companyCommission} @ ${appliedCommissionPercent}%)`,
+          referenceRideId: rideId,
+        },
+      });
+      return { settled: true, type: 'COMMISSION', driverNetEarnings, companyCommission };
+    }
+
+    // Confirmed ONLINE / UPI payment
+    const newBalance = Math.round((currentBalance + driverNetEarnings) * 100) / 100;
+    await tx.wallet.update({
+      where: { id: liveWallet.id },
+      data: {
+        balance: newBalance,
+        lifetimeEarnings: Math.round((Number(liveWallet.lifetimeEarnings) + driverNetEarnings) * 100) / 100,
+      },
+    });
+
+    await tx.walletTransaction.create({
+      data: {
+        walletId: liveWallet.id,
+        amount: driverNetEarnings,
+        type: 'EARNING',
+        status: 'COMPLETED',
+        previousBalance: currentBalance,
+        newBalance,
+        description: `Earnings for trip ${bookingCode} (Online: ₹${customerPayable}, Commission: ₹${companyCommission} @ ${appliedCommissionPercent}%)`,
+        referenceRideId: rideId,
+      },
+    });
+    return { settled: true, type: 'EARNING', driverNetEarnings, companyCommission };
+  }
+
   async getRideById(rideId: string) {
     const cleanRideId = String(rideId).trim();
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanRideId);
@@ -920,6 +1052,10 @@ export class RidesService {
         },
         vehicle: true,
         fareBreakdown: true,
+        paymentTransactions: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+        },
       },
     });
     if (!r) return null;
@@ -952,8 +1088,16 @@ export class RidesService {
       meta.requestedVehicle?.toLowerCase().includes('elite') ||
       r.tripType?.toLowerCase().includes('elite')
     );
+    const txMap = await getLedgerTxMapForRides([r.id]);
+    const breakdown = resolveDriverRideBreakdown(r, txMap.get(r.id));
+    const latestGatewayTx = r.paymentTransactions?.[0] || null;
+
     return {
       ...r,
+      ...breakdown,
+      gatewayOrderId: latestGatewayTx?.razorpayOrderId || meta.gatewayOrderId || null,
+      gatewayPaymentId: latestGatewayTx?.razorpayPaymentId || meta.gatewayPaymentId || null,
+      gatewayStatus: latestGatewayTx?.status || r.paymentStatus,
       assignedVehicleId: r.vehicleId || r.vehicle?.id || r.driver?.assignedVehicleId || null,
       assignedVehicleNumber: r.vehicle?.vehicleNumber || r.driver?.assignedVehicle?.vehicleNumber || null,
       assignedVehicleModel: r.vehicle?.model || r.driver?.assignedVehicle?.model || null,
@@ -1027,6 +1171,8 @@ export class RidesService {
       },
     });
 
+    const txMap = await getLedgerTxMapForRides(rides.map((r) => r.id));
+
     return rides.map(({ startOtp, ...safeRide }) => {
       const meta = (safeRide.stops as any) || {};
       const finalTripType = standardizeTripType({
@@ -1040,8 +1186,11 @@ export class RidesService {
         meta.requestedVehicle?.toLowerCase().includes('elite') ||
         safeRide.tripType?.toLowerCase().includes('elite')
       );
+      const breakdown = resolveDriverRideBreakdown(safeRide, txMap.get(safeRide.id));
+
       return {
         ...safeRide,
+        ...breakdown,
         assignedVehicleId: safeRide.vehicleId || safeRide.vehicle?.id || driver.assignedVehicleId || null,
         assignedVehicleNumber: safeRide.vehicle?.vehicleNumber || driver.assignedVehicle?.vehicleNumber || null,
         assignedVehicleModel: safeRide.vehicle?.model || driver.assignedVehicle?.model || null,
@@ -1128,6 +1277,8 @@ export class RidesService {
       return true;
     });
 
+    const txMap = await getLedgerTxMapForRides(filteredRides.map((r) => r.id));
+
     return filteredRides.map((r) => {
       const meta = (r.stops as any) || {};
       const isScheduled = !!meta.isScheduled && !!meta.scheduledAt;
@@ -1143,6 +1294,7 @@ export class RidesService {
         meta.requestedVehicle?.toLowerCase().includes('elite') ||
         r.tripType?.toLowerCase().includes('elite')
       );
+      const breakdown = resolveDriverRideBreakdown(r, txMap.get(r.id));
 
       return {
         id: r.id,
@@ -1155,10 +1307,12 @@ export class RidesService {
         dropLocation: r.dropLocation,
         dropAddress: r.dropAddress || r.dropLocation,
         distance: `${r.distanceKm} km`,
-        distanceKm: r.distanceKm,
         estimatedFare: `₹ ${Math.round(r.fareBreakdown?.totalFare ?? r.estimatedFare ?? 0)}`,
         fareAmount: r.fareBreakdown?.totalFare ?? r.estimatedFare ?? 0,
+        fareBreakdown: r.fareBreakdown,
+        ...breakdown,
         paymentMethod: r.paymentMethod,
+        paymentStatus: r.paymentStatus,
         tripType: finalTripType,
         isElite,
         category: isElite ? 'ELITE' : (meta.category || 'REGULAR'),

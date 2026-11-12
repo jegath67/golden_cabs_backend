@@ -4,6 +4,7 @@ import { unavailabilityService } from '../unavailability/unavailability.service'
 import { normalizePhone } from '../auth/auth.service';
 import { locationCacheService } from './location-cache.service';
 import { vehiclesService } from '../vehicles/vehicles.service';
+import { walletService } from '../wallet/wallet.service';
 
 export class DriversService {
   async getDriverByUserId(userId: string) {
@@ -249,6 +250,19 @@ export class DriversService {
       panImage?: string;
       selfieImage?: string;
       assignedHubId?: string;
+      bankName?: string;
+      bankAccountNumber?: string;
+      bankIfsc?: string;
+      bankHolderName?: string;
+      bankDetails?: {
+        bankName?: string;
+        bankAccountNumber?: string;
+        accountNo?: string;
+        bankIfsc?: string;
+        ifsc?: string;
+        bankHolderName?: string;
+        accountHolderName?: string;
+      };
       vehicle?: {
         brand?: string;
         model?: string;
@@ -407,6 +421,29 @@ export class DriversService {
         ownedVehicles: true,
       },
     });
+
+    // Persist bank details into driver Wallet if provided during KYC onboarding
+    const acctNo =
+      data.bankDetails?.bankAccountNumber ||
+      data.bankDetails?.accountNo ||
+      data.bankAccountNumber;
+    const ifscCode = data.bankDetails?.bankIfsc || data.bankDetails?.ifsc || data.bankIfsc;
+    const holderName =
+      data.bankDetails?.bankHolderName ||
+      data.bankDetails?.accountHolderName ||
+      data.bankHolderName ||
+      data.name ||
+      updated.user?.name;
+    const bName = data.bankDetails?.bankName || data.bankName;
+
+    if (acctNo && ifscCode && holderName) {
+      await walletService.updateBankDetails(userId, {
+        ...(bName ? { bankName: bName } : {}),
+        bankAccountNumber: acctNo,
+        bankIfsc: ifscCode,
+        bankHolderName: holderName,
+      });
+    }
 
     // Notify driver of successful submission
     if (userId) {
