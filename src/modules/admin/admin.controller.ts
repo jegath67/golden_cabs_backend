@@ -1034,8 +1034,13 @@ export class AdminController {
         else if (tx.status === 'FAILED') displayStatus = 'Rejected';
 
         const created = tx.createdAt;
-        const dateStr = created.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-        const timeStr = created.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+        const dateStr = created.toLocaleDateString('en-GB', {
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric',
+          timeZone: 'Asia/Kolkata',
+        });
+        const timeStr = formatISTTime(created);
 
         const completedRides = driver?.rides || [];
         let grossEarningsVal = 0;

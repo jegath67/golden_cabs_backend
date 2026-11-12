@@ -124,7 +124,7 @@ async function main() {
   const docAadharFront = '/uploads/doc_1793102896324_29b5c1b93cbb.jpg';
   const docAadharBack = '/uploads/doc_1793102896401_b455c0ef75b7.jpg';
   const docPan = '/uploads/doc_1793102896421_8c2102da74bc.jpg';
-  const docSelfie = '/uploads/doc_1793102896199_6d56516d010e.jpg';
+  const docSelfie: string | null = null;
 
   const results: any[] = [];
 
@@ -189,7 +189,10 @@ async function main() {
           aadharBack: profile.aadharBack ?? docAadharBack,
           panNumber: profile.panNumber ?? seed.panNumber,
           panImage: profile.panImage ?? docPan,
-          selfieImage: profile.selfieImage ?? docSelfie,
+          selfieImage:
+            profile.selfieImage === '/uploads/doc_1793102896199_6d56516d010e.jpg'
+              ? null
+              : profile.selfieImage,
         },
         include: { wallet: true },
       });
