@@ -181,6 +181,7 @@ model CustomerProfile {
   dob              String?
   address          String?
   emergencyContact String?
+  profileImage     String?
   rating           Float    @default(5.0)
   totalRides       Int      @default(0)
   createdAt        DateTime @default(now())
@@ -321,6 +322,16 @@ model Vehicle {
   sourceEliteCarId String?        @unique
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
+
+  // Classification & Capacity Structure (Phase 1 Additive Fields)
+  serviceCategory            String    @default("NORMAL") // "NORMAL" | "ELITE"
+  vehicleClass               String?   // "HATCHBACK", "SEDAN", "SUV", "MPV", "LUXURY_SEDAN", "LUXURY_SUV", "LUXURY_COUPE"
+  passengerCapacity          Int?      // Actual verified passenger seating capacity (excluding driver)
+  driverSeatCount            Int       @default(1) // Standard 1 driver seat
+  totalCapacity              Int?      // Derived: passengerCapacity + driverSeatCount
+  capacityVerified           Boolean   @default(false) // False until verified against physical RC
+  capacityVerificationSource String?   // e.g. "RC_MANUAL_VERIFIED", "PENDING_RC_AUDIT"
+  capacityVerifiedAt         DateTime? // Timestamp when RC evidence was verified by Admin
 
   // Fleet Owner / Vendor relationship (for rental / ownVehicle)
   ownerId         String?
@@ -732,8 +743,14 @@ model PricingSlab {
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
+  // Classification & Capacity Structure (Phase 1 Additive Fields)
+  serviceCategory     String   @default("NORMAL") // "NORMAL" | "ELITE"
+  vehicleClass        String?  // "HATCHBACK", "SEDAN", "SUV", "MPV", etc.
+  passengerCapacity   Int?     // Target passenger tier (e.g. 4, 6, 7)
+
   @@index([vehicleType, rideType])
   @@index([status])
+  @@index([serviceCategory, vehicleClass])
 }
 
 model PlatformSetting {

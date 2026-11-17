@@ -240,6 +240,49 @@ export class WalletService {
     }));
   }
 
+  // Indian Commercial & Public Sector Banks mapped by IFSC 4-letter prefix
+  private static readonly ifscBankPrefixMap: Record<string, string> = {
+    SBIN: 'State Bank of India',
+    HDFC: 'HDFC Bank',
+    ICIC: 'ICICI Bank',
+    UTIB: 'Axis Bank',
+    PUNB: 'Punjab National Bank',
+    BARB: 'Bank of Baroda',
+    CNRB: 'Canara Bank',
+    UBIN: 'Union Bank of India',
+    IDIB: 'Indian Bank',
+    IOBA: 'Indian Overseas Bank',
+    KKBK: 'Kotak Mahindra Bank',
+    INDB: 'IndusInd Bank',
+    YESB: 'Yes Bank',
+    IDFB: 'IDFC FIRST Bank',
+    FEDL: 'Federal Bank',
+    FDRL: 'Federal Bank',
+    CBIN: 'Central Bank of India',
+    BKID: 'Bank of India',
+    MAHB: 'Bank of Maharashtra',
+    PSIB: 'Punjab & Sind Bank',
+    UCBA: 'UCO Bank',
+    KVBL: 'Karur Vysya Bank',
+    CIUB: 'City Union Bank',
+    TMBL: 'Tamilnad Mercantile Bank',
+    CSBK: 'CSB Bank',
+    SIBL: 'South Indian Bank',
+    AUBL: 'AU Small Finance Bank',
+    ESFB: 'Equitas Small Finance Bank',
+    UJVN: 'Ujjivan Small Finance Bank',
+    AIRP: 'Airtel Payments Bank',
+    PYTM: 'Paytm Payments Bank',
+    IPOS: 'India Post Payments Bank',
+    RBLN: 'RBL Bank',
+    BAND: 'Bandhan Bank',
+    JSFB: 'Jana Small Finance Bank',
+    DBSS: 'DBS Bank India',
+    SCBL: 'Standard Chartered Bank',
+    HSBC: 'HSBC India',
+    CITI: 'Citibank India',
+  };
+
   private validateBankDetailsInput(data: {
     bankName?: string;
     bankAccountNumber: string;
@@ -249,26 +292,50 @@ export class WalletService {
     const holder = String(data.bankHolderName || '').trim();
     const acct = String(data.bankAccountNumber || '').replace(/\s+/g, '').trim();
     const ifsc = String(data.bankIfsc || '').trim().toUpperCase();
-    const bankName = data.bankName !== undefined ? String(data.bankName || '').trim() : undefined;
+    let bankName = data.bankName !== undefined ? String(data.bankName || '').trim() : undefined;
 
-    if (holder.length < 2) {
-      throw new Error('Account holder name is required');
+    // Account Holder Name validation
+    if (!holder || holder.length < 3) {
+      throw new Error('Account holder name must be at least 3 characters');
     }
-    if (bankName !== undefined && bankName.length > 0 && bankName.length < 2) {
-      throw new Error('Bank name must be at least 2 characters');
+    if (holder.length > 60) {
+      throw new Error('Account holder name cannot exceed 60 characters');
     }
+    if (!/^[a-zA-Z\s.]+$/.test(holder)) {
+      throw new Error('Account holder name should contain only letters, dots, and spaces');
+    }
+
+    // Account Number validation
     if (!/^\d{9,18}$/.test(acct)) {
-      throw new Error('Account number must be 9 to 18 digits');
+      throw new Error('Account number must be 9 to 18 digits (numeric only)');
     }
-    if (!/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifsc)) {
-      throw new Error('Invalid IFSC code format (e.g. SBIN0001234)');
+    if (/^(\d)\1+$/.test(acct)) {
+      throw new Error('Invalid account number: all digits cannot be identical');
+    }
+
+    // IFSC Code validation
+    if (ifsc.length !== 11 || !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifsc)) {
+      throw new Error('Invalid IFSC code format (e.g. SBIN0001234 - 5th character must be 0)');
+    }
+
+    // Bank Name validation & derivation
+    if (!bankName || bankName.length === 0) {
+      const ifscPrefix = ifsc.substring(0, 4);
+      bankName = WalletService.ifscBankPrefixMap[ifscPrefix];
+      if (!bankName) {
+        throw new Error('Bank name is required');
+      }
+    } else {
+      if (bankName.length < 2 || bankName.length > 50) {
+        throw new Error('Bank name must be between 2 and 50 characters');
+      }
     }
 
     return {
       bankHolderName: holder,
       bankAccountNumber: acct,
       bankIfsc: ifsc,
-      ...(bankName ? { bankName } : {}),
+      bankName,
     };
   }
 
@@ -354,8 +421,8 @@ export class WalletService {
       const liveWallet = lockedWallets[0];
       if (!liveWallet) throw new Error('Driver wallet not found');
 
-      if (!liveWallet.bankAccountNumber || !liveWallet.bankIfsc) {
-        throw new Error('Please link your bank account before requesting cashout');
+      if (!liveWallet.bankAccountNumber || !liveWallet.bankIfsc || !liveWallet.bankHolderName) {
+        throw new Error('Please link your verified bank account before requesting cashout');
       }
 
       if (Number(liveWallet.balance) < 0) {

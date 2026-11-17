@@ -60,10 +60,12 @@ export class RefundsService {
       throw new Error('Only paid rides are eligible for a refund. Current payment status is ' + ride.paymentStatus);
     }
 
-    // 4. Calculate refundable amount securely from trusted database fields
-    const refundableAmount = ride.finalFare ?? ride.estimatedFare;
+    // 4. Calculate refundable amount securely based on cancellation and policy rules
+    const { ridesService } = await import('../rides/rides.service');
+    const quote = ridesService.calculateCancellationPolicy(ride);
+    const refundableAmount = quote.eligibleRefund;
     if (refundableAmount <= 0) {
-      throw new Error('This ride has a zero fare and is not eligible for refund');
+      throw new Error(`This ride is not eligible for refund: ${quote.reason}`);
     }
 
     // Combine reason and additional notes if provided
@@ -170,11 +172,36 @@ export class RefundsService {
               id: true,
               bookingCode: true,
               pickupLocation: true,
+              pickupAddress: true,
               dropLocation: true,
+              dropAddress: true,
               paymentMethod: true,
               paymentStatus: true,
               status: true,
               createdAt: true,
+              finalFare: true,
+              estimatedFare: true,
+              driver: {
+                include: {
+                  user: {
+                    select: {
+                      id: true,
+                      name: true,
+                      phone: true,
+                      email: true,
+                    },
+                  },
+                },
+              },
+              paymentTransactions: {
+                orderBy: { createdAt: 'desc' },
+                take: 1,
+                select: {
+                  razorpayPaymentId: true,
+                  razorpayOrderId: true,
+                  status: true,
+                },
+              },
             },
           },
         },
@@ -331,8 +358,29 @@ export class RefundsService {
           return updated;
         });
       } else {
-        // Manual banking reversal (UPI / Card / Cash)
-        const finalRemarks = adminRemarks?.trim() || 'Manual Settlement confirmed by Admin';
+        // Online Gateway Refund OR Manual banking reversal (UPI / Card / Cash)
+        let gatewayRefundId: string | null = null;
+        const isGatewaySettlement = (adminRemarks || '').includes('[AUTO_GATEWAY]');
+
+        if (isGatewaySettlement) {
+          const { paymentsService } = await import('../payments/payments.service');
+          try {
+            const rzp = await paymentsService.initiateRazorpayRefund({
+              rideId: refund.rideId,
+              amountInr: refund.amount,
+              reason: refund.reason,
+            });
+            gatewayRefundId = rzp.refundId;
+          } catch (gateErr: any) {
+            throw new Error(
+              `Automatic Razorpay refund failed: ${gateErr.message || gateErr}. Please verify gateway configuration or use manual bank UTR settlement.`
+            );
+          }
+        }
+
+        const finalRemarks = gatewayRefundId
+          ? `[RAZORPAY_REFUND: ${gatewayRefundId}] Automatic gateway refund processed successfully per admin approval`
+          : (adminRemarks?.trim() || 'Manual Settlement confirmed by Admin');
 
         return prisma.$transaction(async (tx) => {
           const claimed = await tx.$queryRaw<any[]>`

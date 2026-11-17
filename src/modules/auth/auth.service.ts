@@ -656,6 +656,7 @@ export class AuthService {
     city?: string;
     state?: string;
     pincode?: string;
+    profileImage?: string;
   }) {
     const user = await prisma.user.findUnique({
       where: { id: userId },
@@ -714,6 +715,7 @@ export class AuthService {
     const profileUpdates: any = {};
     if (data.gender !== undefined) profileUpdates.gender = data.gender ? data.gender.trim() : null;
     if (data.dob !== undefined) profileUpdates.dob = data.dob ? data.dob.trim() : null;
+    if (data.profileImage !== undefined) profileUpdates.profileImage = data.profileImage ? data.profileImage.trim() : null;
     if ((data as any).emergencyContact !== undefined) profileUpdates.emergencyContact = (data as any).emergencyContact ? (data as any).emergencyContact.trim() : null;
     if (data.address !== undefined) {
       profileUpdates.address = data.address ? data.address.trim() : null;

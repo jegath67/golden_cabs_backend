@@ -55,6 +55,13 @@ export async function ridesRoutes(app: FastifyInstance) {
     ridesController.getMyRides.bind(ridesController)
   );
 
+  // Cancellation quote / policy preview
+  app.get(
+    '/:id/cancellation-quote',
+    { preHandler: [authenticate] },
+    ridesController.getCancellationQuote.bind(ridesController)
+  );
+
   // Get specific ride details
   app.get(
     '/:id',

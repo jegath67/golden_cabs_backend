@@ -50,7 +50,8 @@ export class DriversController {
   }
 
   async updateLocation(req: FastifyRequest<any>, reply: FastifyReply) {
-    const { latitude, longitude, heading, speed, accuracy, rideId, timestamp, clientTimestamp } = (req.body as {
+    const { updateId, latitude, longitude, heading, speed, accuracy, rideId, timestamp, clientTimestamp } = (req.body as {
+      updateId?: string;
       latitude?: number;
       longitude?: number;
       heading?: number;
@@ -60,6 +61,13 @@ export class DriversController {
       timestamp?: number;
       clientTimestamp?: number;
     }) || {};
+
+    if (updateId !== undefined && (typeof updateId !== 'string' || updateId.trim().length === 0)) {
+      return reply.status(400).send({
+        success: false,
+        message: 'Optional updateId must be a non-empty string',
+      });
+    }
 
     if (latitude === undefined || typeof latitude !== 'number' || !Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
       return reply.status(400).send({
@@ -107,6 +115,7 @@ export class DriversController {
       const user = req.user as { id: string };
       const rawTs = typeof clientTimestamp === 'number' ? clientTimestamp : (typeof timestamp === 'number' ? timestamp : undefined);
       const updated = await driversService.updateLocation(user.id, {
+        updateId: updateId?.trim(),
         latitude,
         longitude,
         heading,
@@ -118,13 +127,16 @@ export class DriversController {
 
       return reply.send({
         success: true,
-        message: 'Location updated',
+        message: updated.isDuplicate ? 'Duplicate location update acknowledged' : 'Location updated',
         data: {
           latitude: updated.currentLatitude,
           longitude: updated.currentLongitude,
           currentLatitude: updated.currentLatitude,
           currentLongitude: updated.currentLongitude,
           updatedAt: updated.updatedAt,
+          version: updated.version,
+          isDuplicate: updated.isDuplicate,
+          isStale: updated.isStale,
         },
       });
     } catch (error: any) {

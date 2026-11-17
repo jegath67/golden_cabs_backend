@@ -4,6 +4,7 @@ import { getRedisClient, isRedisAvailable } from '../../config/redis';
 export interface DriverLocationData {
   driverId: string;
   userId?: string;
+  updateId?: string;
   latitude: number;
   longitude: number;
   heading?: number;
@@ -13,6 +14,8 @@ export interface DriverLocationData {
   clientTimestamp?: number;
   updatedAt: number;
   version: number;
+  isDuplicate?: boolean;
+  isStale?: boolean;
 }
 
 export interface DriverFailureInfo {
@@ -26,6 +29,11 @@ export class LocationCacheService {
   private dirtyDriverIds = new Set<string>();
   private lastFlushedVersion = new Map<string, number>();
   private failureTracking = new Map<string, DriverFailureInfo>();
+
+  // Idempotency: per-driver recent updateIds sliding buffer (keeps last 50 IDs per driver)
+  private recentUpdateIds = new Map<string, Map<string, number>>();
+  // Atomic serialization queue per driver to prevent race conditions on concurrent Socket + HTTP retries
+  private driverQueues = new Map<string, Promise<any>>();
 
   // P2 Optimization: In-Memory caches to reduce repetitive PostgreSQL queries during GPS pings
   private userToDriverIdCache = new Map<string, { driverId: string; cachedAt: number }>();
@@ -59,12 +67,48 @@ export class LocationCacheService {
 
   /**
    * Saves or updates a driver's live GPS coordinates in Redis / In-Memory cache.
-   * Monotonically tracks version numbers and prevents delayed mobile packets from overwriting newer server locations.
+   * Monotonically tracks version numbers, prevents out-of-order delayed packets,
+   * and provides strict atomic deduplication across concurrent Socket.IO and HTTP requests.
    */
   async saveDriverLocation(
     driverId: string,
     data: {
       userId?: string;
+      updateId?: string;
+      latitude: number;
+      longitude: number;
+      heading?: number;
+      speed?: number;
+      accuracy?: number;
+      rideId?: string;
+      clientTimestamp?: number;
+      timestamp?: number;
+    }
+  ): Promise<DriverLocationData> {
+    // Condition 9: Atomic serialization queue per driver to eliminate concurrent Socket + HTTP race conditions
+    const prev = this.driverQueues.get(driverId) || Promise.resolve();
+    let resolveCurrent: () => void;
+    const currentPromise = new Promise<void>((r) => {
+      resolveCurrent = r;
+    });
+    this.driverQueues.set(driverId, currentPromise);
+
+    try {
+      await prev;
+      return await this.executeSaveDriverLocation(driverId, data);
+    } finally {
+      resolveCurrent!();
+      if (this.driverQueues.get(driverId) === currentPromise) {
+        this.driverQueues.delete(driverId);
+      }
+    }
+  }
+
+  private async executeSaveDriverLocation(
+    driverId: string,
+    data: {
+      userId?: string;
+      updateId?: string;
       latitude: number;
       longitude: number;
       heading?: number;
@@ -78,30 +122,91 @@ export class LocationCacheService {
     const existing = this.memoryCache.get(driverId);
     const now = Date.now();
 
-    // 1. Out-of-order delayed mobile packet validation
     const rawClientTs = data.clientTimestamp ?? data.timestamp;
     let sanitizedClientTs: number | undefined;
 
     if (rawClientTs !== undefined && typeof rawClientTs === 'number' && Number.isFinite(rawClientTs)) {
-      // Reject or clamp unrealistic future timestamps (> 60s ahead)
       sanitizedClientTs = Math.min(rawClientTs, now + 60000);
+    }
 
-      // If this driver already has a newer client timestamp recorded, drop the delayed packet
-      if (existing && existing.clientTimestamp !== undefined && sanitizedClientTs < existing.clientTimestamp) {
-        console.warn(
-          `[LocationCache] Dropped delayed GPS packet for driver ${driverId} (incoming clientTs: ${sanitizedClientTs} < cached clientTs: ${existing.clientTimestamp})`
-        );
-        return existing;
+    // ─────────────────────────────────────────────────────────────
+    // 1. DUPLICATE CHECK (Conditions 1, 2, 3, 4, 6)
+    // ─────────────────────────────────────────────────────────────
+    let isDuplicate = false;
+    const cleanUpdateId = data.updateId?.trim();
+    const driverRecentMap = this.recentUpdateIds.get(driverId);
+
+    if (cleanUpdateId && cleanUpdateId.length > 0) {
+      // Check A: Explicit updateId in memory buffer
+      if (existing?.updateId === cleanUpdateId || (driverRecentMap && driverRecentMap.has(cleanUpdateId))) {
+        isDuplicate = true;
+      }
+
+      // Check B: Redis check for restart persistence (Condition 3)
+      if (!isDuplicate && isRedisAvailable()) {
+        try {
+          const redis = getRedisClient();
+          if (redis) {
+            // Atomic NX set with 120s TTL
+            const setRes = await redis.set(`driver:update_id:${driverId}:${cleanUpdateId}`, '1', 'EX', 120, 'NX');
+            if (setRes === null) {
+              isDuplicate = true; // Already processed in Redis (e.g. processed before backend restarted)
+            }
+          }
+        } catch (_) {}
+      }
+    } else {
+      // Check C: Backward-compatible fingerprint check (Condition 4)
+      if (
+        existing &&
+        sanitizedClientTs !== undefined &&
+        existing.clientTimestamp !== undefined &&
+        sanitizedClientTs === existing.clientTimestamp &&
+        Math.abs(data.latitude - existing.latitude) < 1e-6 &&
+        Math.abs(data.longitude - existing.longitude) < 1e-6
+      ) {
+        isDuplicate = true;
       }
     }
 
-    // Monotonically increasing server timestamp and version
+    if (isDuplicate && existing) {
+      // DUPLICATE DETECTED:
+      // Condition 6: MUST NOT increment version, write Redis, update dirty sets, or broadcast
+      return {
+        ...existing,
+        isDuplicate: true,
+      };
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 2. STALE / OUT-OF-ORDER CHECK (Conditions 5 & 7)
+    // ─────────────────────────────────────────────────────────────
+    if (
+      existing &&
+      existing.clientTimestamp !== undefined &&
+      sanitizedClientTs !== undefined &&
+      sanitizedClientTs < existing.clientTimestamp
+    ) {
+      console.warn(
+        `[LocationCache] Dropped delayed GPS packet for driver ${driverId} (incoming clientTs: ${sanitizedClientTs} < cached clientTs: ${existing.clientTimestamp})`
+      );
+      // Stale packet: do NOT overwrite newer data, do NOT increment version
+      return {
+        ...existing,
+        isStale: true,
+      };
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 3. NEW LEGITIMATE GPS UPDATE (Conditions 5 & 8)
+    // ─────────────────────────────────────────────────────────────
     const serverUpdatedAt = existing ? Math.max(now, existing.updatedAt + 1) : now;
     const nextVersion = (existing?.version ?? 0) + 1;
 
     const locationEntry: DriverLocationData = {
       driverId,
       userId: data.userId ?? existing?.userId,
+      updateId: cleanUpdateId,
       latitude: data.latitude,
       longitude: data.longitude,
       heading: data.heading,
@@ -111,13 +216,30 @@ export class LocationCacheService {
       clientTimestamp: sanitizedClientTs,
       updatedAt: serverUpdatedAt,
       version: nextVersion,
+      isDuplicate: false,
+      isStale: false,
     };
 
     // 1. Update In-Memory cache
     this.memoryCache.set(driverId, locationEntry);
     this.dirtyDriverIds.add(driverId);
 
-    // 2. If Redis is available, write to Redis Hash, Redis GEO, and Redis Dirty Set
+    // 2. Record updateId in recent sliding buffer
+    if (cleanUpdateId && cleanUpdateId.length > 0) {
+      let map = this.recentUpdateIds.get(driverId);
+      if (!map) {
+        map = new Map<string, number>();
+        this.recentUpdateIds.set(driverId, map);
+      }
+      map.set(cleanUpdateId, now);
+      // Prune entries older than 60s or keep size <= 50
+      if (map.size > 50) {
+        const oldestKey = map.keys().next().value;
+        if (oldestKey) map.delete(oldestKey);
+      }
+    }
+
+    // 3. If Redis is available, write to Redis Hash, Redis GEO, and Redis Dirty Set
     if (isRedisAvailable()) {
       try {
         const redis = getRedisClient();
@@ -130,6 +252,7 @@ export class LocationCacheService {
           pipeline.hset(hashKey, {
             driverId,
             userId: data.userId || '',
+            updateId: cleanUpdateId || '',
             latitude: String(data.latitude),
             longitude: String(data.longitude),
             heading: String(data.heading ?? 0),
@@ -143,6 +266,12 @@ export class LocationCacheService {
           pipeline.expire(hashKey, 3600); // 1 hour TTL
           pipeline.geoadd(geoKey, data.longitude, data.latitude, driverId);
           pipeline.sadd(dirtySetKey, driverId);
+
+          // Also set the updateId key in Redis if present
+          if (cleanUpdateId && cleanUpdateId.length > 0) {
+            pipeline.set(`driver:update_id:${driverId}:${cleanUpdateId}`, '1', 'EX', 120);
+          }
+
           await pipeline.exec();
         }
       } catch (err) {

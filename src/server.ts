@@ -29,8 +29,11 @@ import { paymentsRoutes } from './modules/payments/payments.routes';
 import { schedulerService } from './modules/scheduler/scheduler.service';
 import { initRedis, isRedisAvailable, disconnectRedis } from './config/redis';
 import { locationCacheService } from './modules/drivers/location-cache.service';
+import { socketService } from './modules/socket/socket.service';
 
-const uploadsDir = path.join(process.cwd(), 'uploads');
+const uploadsDir = process.env.UPLOADS_DIR
+  ? path.resolve(process.env.UPLOADS_DIR)
+  : path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
@@ -172,15 +175,20 @@ const start = async () => {
     // Initialize background batch sync for real-time driver GPS locations (flushes dirty coords every 5s)
     locationCacheService.init(5000);
 
+    const PORT = Number(process.env.PORT) || 3000;
+
     await app.listen({
-      port: 3000,
+      port: PORT,
       host: '0.0.0.0',
     });
+
+    // Initialize real-time Socket.IO server on Fastify HTTP server with JWT verification
+    socketService.init(app.server, (token: string) => app.jwt.verify(token));
 
     // Initialize background daily scheduler (midnight vehicle reset, etc.)
     schedulerService.init();
 
-    console.log('🚀 Golden Cabs Backend running on http://localhost:3000');
+    console.log(`🚀 Golden Cabs Backend running on http://0.0.0.0:${PORT}`);
   } catch (error) {
     app.log.error(error);
     process.exit(1);
@@ -193,6 +201,7 @@ signals.forEach((signal) => {
   process.on(signal, async () => {
     console.log(`\nReceived ${signal}. Gracefully shutting down...`);
     try {
+      await socketService.close();
       const shutdownRes = await locationCacheService.destroy(10000);
       if (!shutdownRes.success) {
         console.warn(`[Shutdown] Completed with ${shutdownRes.unflushedCount} unflushed location records.`);

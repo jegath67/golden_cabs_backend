@@ -27,9 +27,31 @@ export interface RazorpayOrderResponse {
   status?: string;
 }
 
+export interface RazorpayRefundCreateParams {
+  amount?: number;
+  speed?: 'normal' | 'optimum';
+  notes?: Record<string, string>;
+  receipt?: string;
+}
+
+export interface RazorpayRefundResponse {
+  id: string;
+  entity: string;
+  amount: number;
+  currency: string;
+  payment_id: string;
+  status: string;
+  speed_processed?: string;
+  speed_requested?: string;
+  receipt?: string;
+}
+
 export interface RazorpayClientLike {
   orders: {
     create(params: RazorpayOrderCreateParams): Promise<RazorpayOrderResponse>;
+  };
+  payments: {
+    refund(paymentId: string, params?: RazorpayRefundCreateParams): Promise<RazorpayRefundResponse>;
   };
 }
 
@@ -376,9 +398,9 @@ export class PaymentsService {
           statusCode: 403,
         });
       }
-      if (ride.status === 'CANCELLED' || ride.paymentStatus === 'REFUNDED') {
+      if (ride.paymentStatus === 'REFUNDED') {
         throw Object.assign(
-          new Error(`Cannot verify payment for ${ride.status} / ${ride.paymentStatus} ride`),
+          new Error(`Cannot verify payment for already refunded ride`),
           { statusCode: 400 }
         );
       }
@@ -533,9 +555,9 @@ export class PaymentsService {
       if (!ride) {
         throw Object.assign(new Error('Ride not found for payment verification'), { statusCode: 404 });
       }
-      if (ride.status === 'CANCELLED' || ride.paymentStatus === 'REFUNDED') {
+      if (ride.paymentStatus === 'REFUNDED') {
         throw Object.assign(
-          new Error(`Cannot verify payment for ${ride.status} / ${ride.paymentStatus} ride`),
+          new Error(`Cannot verify payment for already refunded ride`),
           { statusCode: 400 }
         );
       }
@@ -675,6 +697,50 @@ export class PaymentsService {
             },
           },
         });
+      }
+
+      // Race condition protection: If ride was cancelled before payment verification committed,
+      // do NOT confirm or assign the cancelled ride; ensure 100% full refund request is recorded.
+      if (ride.status === 'CANCELLED') {
+        const existingRefund = await tx.refundRequest.findUnique({
+          where: { rideId: ride.id },
+        });
+
+        if (!existingRefund) {
+          await tx.refundRequest.create({
+            data: {
+              rideId: ride.id,
+              customerId: ride.customerId,
+              amount: payableFare,
+              status: 'SUBMITTED',
+              reason: '[POST_CANCELLATION_PAYMENT] Payment received after trip was cancelled. Automatic 100% full refund initiated.',
+              adminRemarks: 'Race condition resolved: Customer payment arrived after cancellation. Full refund authorized.',
+            },
+          });
+        } else if (existingRefund.amount < payableFare) {
+          await tx.refundRequest.update({
+            where: { id: existingRefund.id },
+            data: {
+              amount: payableFare,
+              adminRemarks: `${existingRefund.adminRemarks || ''} [Updated to full ₹${payableFare} upon payment verification]`,
+            },
+          });
+        }
+
+        return {
+          rideId: ride.id,
+          bookingCode: ride.bookingCode,
+          paymentTransactionId: paymentTx.id,
+          paymentStatus: 'PAID',
+          gatewayStatus: paymentTx.status,
+          driverUserId: null,
+          alreadyProcessed: true,
+          settledNow: false,
+          driverNetEarnings: 0,
+          companyCommission: 0,
+          isCancelled: true,
+          refundInitiated: true,
+        };
       }
 
       // If ride is already COMPLETED, ensure driver net earnings are credited idempotently
@@ -899,6 +965,104 @@ export class PaymentsService {
       });
     }
 
+    if (event === 'refund.processed') {
+      const refundEntity = body.payload?.refund?.entity || {};
+      const refundPaymentId = refundEntity.payment_id ? String(refundEntity.payment_id) : null;
+      const refundAmountPaise = Number(refundEntity.amount || 0);
+
+      return prisma.$transaction(async (tx) => {
+        const existingEvent = await tx.gatewayWebhookEvent.findUnique({ where: { eventId } });
+        if (existingEvent) {
+          return { ignored: true, duplicateEvent: true, event, eventId };
+        }
+
+        const paymentTx = refundPaymentId
+          ? await tx.paymentTransaction.findFirst({ where: { razorpayPaymentId: refundPaymentId } })
+          : null;
+
+        if (paymentTx) {
+          const nextRefundedPaise = Math.max(paymentTx.refundedAmountPaise, refundAmountPaise);
+          const nextStatus = nextRefundedPaise >= paymentTx.amountPaise ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
+
+          await tx.paymentTransaction.update({
+            where: { id: paymentTx.id },
+            data: {
+              refundedAmountPaise: nextRefundedPaise,
+              status: nextStatus,
+            },
+          });
+
+          // Update RefundRequest to REFUNDED if matching
+          await tx.refundRequest.updateMany({
+            where: { rideId: paymentTx.rideId, status: { not: 'REFUNDED' } },
+            data: {
+              status: 'REFUNDED',
+              adminRemarks: `[RAZORPAY_REFUND: ${refundEntity.id}] Processed via gateway webhook`,
+            },
+          });
+
+          await tx.ride.update({
+            where: { id: paymentTx.rideId },
+            data: { paymentStatus: 'REFUNDED' },
+          });
+        }
+
+        await tx.gatewayWebhookEvent.create({
+          data: {
+            provider: 'RAZORPAY',
+            eventId,
+            eventType: event,
+            razorpayPaymentId: refundPaymentId,
+            paymentTransactionId: paymentTx?.id || null,
+            payload: body,
+            processed: true,
+          },
+        });
+
+        return { ignored: false, event, eventId, refundId: refundEntity.id, status: 'PROCESSED' };
+      });
+    }
+
+    if (event === 'refund.failed') {
+      const refundEntity = body.payload?.refund?.entity || {};
+      const refundPaymentId = refundEntity.payment_id ? String(refundEntity.payment_id) : null;
+      const failureReason = String(refundEntity.error_description || refundEntity.error_reason || 'Gateway refund failed');
+
+      return prisma.$transaction(async (tx) => {
+        const existingEvent = await tx.gatewayWebhookEvent.findUnique({ where: { eventId } });
+        if (existingEvent) {
+          return { ignored: true, duplicateEvent: true, event, eventId };
+        }
+
+        const paymentTx = refundPaymentId
+          ? await tx.paymentTransaction.findFirst({ where: { razorpayPaymentId: refundPaymentId } })
+          : null;
+
+        if (paymentTx) {
+          await tx.refundRequest.updateMany({
+            where: { rideId: paymentTx.rideId },
+            data: {
+              adminRemarks: `[GATEWAY_REFUND_FAILED] ${failureReason}. Please settle manually.`,
+            },
+          });
+        }
+
+        await tx.gatewayWebhookEvent.create({
+          data: {
+            provider: 'RAZORPAY',
+            eventId,
+            eventType: event,
+            razorpayPaymentId: refundPaymentId,
+            paymentTransactionId: paymentTx?.id || null,
+            payload: body,
+            processed: true,
+          },
+        });
+
+        return { ignored: false, event, eventId, status: 'FAILED', failureReason };
+      });
+    }
+
     if (event !== 'payment.captured' && event !== 'order.paid') {
       return { ignored: true, event, eventId };
     }
@@ -943,6 +1107,98 @@ export class PaymentsService {
       gatewayEventType: event,
       webhookPayload: body,
       verificationSource: 'WEBHOOK_CONFIRMED',
+    });
+  }
+
+  /**
+   * Initiates an authoritative, idempotent refund via Razorpay Refund API for verified online payments.
+   */
+  async initiateRazorpayRefund(params: {
+    rideId: string;
+    amountInr: number;
+    reason?: string;
+  }): Promise<{
+    success: boolean;
+    refundId: string;
+    gatewayStatus: string;
+    amountInr: number;
+    receipt: string;
+  }> {
+    const { client } = this.getRazorpayClient();
+    const cleanRideId = String(params.rideId).trim();
+
+    return prisma.$transaction(async (tx) => {
+      // Find the authoritative successful payment transaction for this ride
+      const paymentTx = await tx.paymentTransaction.findFirst({
+        where: {
+          rideId: cleanRideId,
+          status: { in: ['PAID', 'CAPTURED'] },
+          razorpayPaymentId: { not: null },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      if (!paymentTx || !paymentTx.razorpayPaymentId) {
+        throw Object.assign(
+          new Error('No successful Razorpay payment transaction found for this ride'),
+          { statusCode: 404 }
+        );
+      }
+
+      const totalPaidPaise = paymentTx.amountPaise;
+      const alreadyRefundedPaise = paymentTx.refundedAmountPaise || 0;
+      const availablePaise = totalPaidPaise - alreadyRefundedPaise;
+      const requestedPaise = Math.round(params.amountInr * 100);
+
+      if (requestedPaise <= 0) {
+        throw Object.assign(new Error('Refund amount must be greater than ₹0'), { statusCode: 400 });
+      }
+
+      if (requestedPaise > availablePaise) {
+        throw Object.assign(
+          new Error(
+            `Requested refund ₹${params.amountInr} exceeds available balance ₹${availablePaise / 100}`
+          ),
+          { statusCode: 400 }
+        );
+      }
+
+      const receiptSuffix = Date.now().toString(36).toUpperCase();
+      const receipt = `RF_${paymentTx.id.substring(0, 8)}_${receiptSuffix}`.slice(0, 40);
+
+      // Call Razorpay Refund API
+      const rzpRefund = await client.payments.refund(paymentTx.razorpayPaymentId, {
+        amount: requestedPaise,
+        speed: 'optimum',
+        receipt,
+        notes: {
+          rideId: cleanRideId,
+          reason: params.reason || 'Customer ride refund',
+        },
+      });
+
+      if (!rzpRefund?.id) {
+        throw Object.assign(new Error('Gateway did not return a valid refund ID'), { statusCode: 502 });
+      }
+
+      const nextRefundedPaise = alreadyRefundedPaise + requestedPaise;
+      const nextStatus = nextRefundedPaise >= totalPaidPaise ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
+
+      await tx.paymentTransaction.update({
+        where: { id: paymentTx.id },
+        data: {
+          refundedAmountPaise: nextRefundedPaise,
+          status: nextStatus,
+        },
+      });
+
+      return {
+        success: true,
+        refundId: rzpRefund.id,
+        gatewayStatus: rzpRefund.status,
+        amountInr: params.amountInr,
+        receipt,
+      };
     });
   }
 

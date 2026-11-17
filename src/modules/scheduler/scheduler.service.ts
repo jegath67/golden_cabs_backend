@@ -152,7 +152,12 @@ class SchedulerService {
           continue;
         }
 
+        const couponCode = meta.couponCode;
+        const alreadyRestored = meta.couponRestored === true;
+
         const createdAtTime = ride.createdAt ? new Date(ride.createdAt).getTime() : 0;
+        const isPaid = (ride.paymentStatus || '').toUpperCase() === 'PAID';
+        const isOver15MinsFromCreation = createdAtTime > 0 && (now.getTime() - createdAtTime) >= 15 * 60 * 1000;
         const isOver30MinsFromCreation = createdAtTime > 0 && (now.getTime() - createdAtTime) >= 30 * 60 * 1000;
 
         let isPastPickup = false;
@@ -163,6 +168,43 @@ class SchedulerService {
           }
         }
 
+        // 1. Abandoned unpaid scheduled booking: expire after 15 minutes of non-payment
+        if (!isPaid) {
+          if (!isOver15MinsFromCreation && !isPastPickup) {
+            continue;
+          }
+
+          const cancelReason = isPastPickup
+            ? 'Auto-cancelled: Scheduled pickup time arrived before advance payment was completed'
+            : 'Auto-cancelled: Scheduled booking checkout abandoned (payment not completed within 15 minutes)';
+
+          console.log(`[SchedulerService] Auto-cancelling abandoned unpaid scheduled ride ${ride.bookingCode || ride.id}. Reason: ${cancelReason}`);
+
+          await prisma.$transaction(async (tx) => {
+            if (couponCode && !alreadyRestored) {
+              try {
+                const { couponsService } = await import('../coupons/coupons.service');
+                await couponsService.restoreCoupon(couponCode, tx);
+              } catch (couponErr) {
+                console.error(`[SchedulerService] Failed to restore coupon ${couponCode}:`, couponErr);
+              }
+            }
+
+            await tx.ride.update({
+              where: { id: ride.id },
+              data: {
+                status: TripStatus.CANCELLED,
+                cancelReason,
+                cancelledBy: 'SYSTEM',
+                stops: couponCode ? { ...meta, couponRestored: true } : meta,
+              },
+            });
+          });
+
+          continue;
+        }
+
+        // 2. Paid scheduled booking: expire if unassigned past 30m or past pickup time, and issue full refund
         if (!isOver30MinsFromCreation && !isPastPickup) {
           continue;
         }
@@ -173,8 +215,7 @@ class SchedulerService {
 
         console.log(`[SchedulerService] Auto-cancelling scheduled ride ${ride.bookingCode || ride.id}. Reason: ${cancelReason}`);
 
-        const couponCode = meta.couponCode;
-        const alreadyRestored = meta.couponRestored === true;
+        const totalFare = Number(ride.finalFare ?? ride.estimatedFare ?? (ride as any).fareBreakdown?.totalFare ?? 0);
 
         await prisma.$transaction(async (tx) => {
           if (couponCode && !alreadyRestored) {
@@ -195,6 +236,26 @@ class SchedulerService {
               stops: couponCode ? { ...meta, couponRestored: true } : meta,
             },
           });
+
+          // Automatically create 100% full RefundRequest for customer of expired paid scheduled ride
+          if (totalFare > 0) {
+            const existingRefund = await tx.refundRequest.findUnique({
+              where: { rideId: ride.id },
+            });
+
+            if (!existingRefund) {
+              await tx.refundRequest.create({
+                data: {
+                  rideId: ride.id,
+                  customerId: ride.customerId,
+                  reason: `[SYSTEM_EXPIRED] ${cancelReason}`,
+                  amount: totalFare,
+                  status: 'SUBMITTED',
+                  adminRemarks: '100% full refund authorized: System auto-cancelled scheduled trip due to unassigned driver / expired pickup.',
+                },
+              });
+            }
+          }
         });
 
         // Send Push Notification to customer

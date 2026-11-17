@@ -31,6 +31,11 @@ prisma7.config.js.map
 
 # Scratch / local debug
 scratch/
+scratch_*.ts
+test_*.ts
+
+# Database backups (root only)
+/*.sql
 
 # Uploads
 uploads/

@@ -42,13 +42,24 @@ export class WalletController {
 
   async updateBankDetails(req: FastifyRequest<any>, reply: FastifyReply) {
     const user = req.user as { id: string };
-    const { bankName, bankAccountNumber, bankIfsc, bankHolderName } = (req.body as any) || {};
+    const { bankName, bankAccountNumber, bankIfsc, bankHolderName, confirmAccountNumber } = (req.body as any) || {};
 
     if (!bankAccountNumber || !bankIfsc || !bankHolderName) {
       return reply.status(400).send({
         success: false,
         message: 'bankAccountNumber, bankIfsc, and bankHolderName are required',
       });
+    }
+
+    if (confirmAccountNumber !== undefined && confirmAccountNumber !== null) {
+      const cleanAcct = String(bankAccountNumber).replace(/\s+/g, '').trim();
+      const cleanConfirm = String(confirmAccountNumber).replace(/\s+/g, '').trim();
+      if (cleanAcct !== cleanConfirm) {
+        return reply.status(400).send({
+          success: false,
+          message: 'Account number and confirm account number do not match',
+        });
+      }
     }
 
     try {
@@ -58,6 +69,10 @@ export class WalletController {
         bankIfsc,
         bankHolderName,
       });
+
+      const maskedSuffix = String(bankAccountNumber).slice(-4);
+      req.log.info({ userId: user.id, bankAccountMasked: `****${maskedSuffix}`, ifsc: bankIfsc }, 'Bank details updated successfully');
+
       return reply.send({ success: true, message: 'Bank details updated', data: updated });
     } catch (error: any) {
       return reply.status(400).send({ success: false, message: error.message || 'Failed to update bank details' });

@@ -30,6 +30,13 @@ export function formatAdminCode(adminId?: string | null): string {
   return `ADM-${suffix}`;
 }
 
+export function formatPayoutCode(txId?: string | null): string {
+  if (!txId) return '#PO-00000000';
+  const clean = String(txId).replace(/^#?PO-?/i, '').replace(/-/g, '').toUpperCase();
+  const suffix = clean.length >= 8 ? clean.substring(0, 8) : clean.padStart(8, '0');
+  return `#PO-${suffix}`;
+}
+
 function formatISTDateTime(date?: Date | string | null): string {
   if (!date) return '';
   const d = date instanceof Date ? date : new Date(date);
@@ -142,6 +149,10 @@ function formatRideResponse(r: any) {
     customerId: r.customer?.id || r.customerId,
     customerName: r.customer?.name || 'Customer',
     customerPhone: r.customer?.phone || '',
+    riderName: meta.riderName || null,
+    riderPhone: meta.riderPhone || null,
+    passengerName: (meta.riderName && meta.riderName !== 'For me') ? meta.riderName : (r.customer?.name || 'Customer'),
+    passengerPhone: meta.riderPhone || r.customer?.phone || '',
     requestedVehicleId: reqVehicle,
     requestedSeatCount: seatCap,
     assignedDriverId: rawDriverId,
@@ -639,6 +650,13 @@ export class AdminController {
         });
       }
 
+      if (targetRide.isScheduled && (ride.paymentStatus || '').toUpperCase() !== 'PAID') {
+        return reply.status(400).send({
+          success: false,
+          message: 'Cannot assign driver to an unpaid scheduled trip. Advance payment is required before dispatch.',
+        });
+      }
+
       // 2. Locate candidate driver strictly (NO silent fallback to first driver!)
       const rawStr = String(driverId).trim();
       const cleanDriverId = rawStr
@@ -701,7 +719,7 @@ export class AdminController {
       const updated = await prisma.$transaction(async (tx) => {
         const currentRide = await tx.ride.findUnique({
           where: { id: ride.id },
-          select: { id: true, status: true, driverId: true },
+          select: { id: true, status: true, driverId: true, paymentStatus: true },
         });
 
         if (!currentRide) {
@@ -710,6 +728,10 @@ export class AdminController {
 
         if (currentRide.status === 'COMPLETED' || currentRide.status === 'CANCELLED') {
           throw new Error(`Ride status is already ${currentRide.status}`);
+        }
+
+        if (targetRide.isScheduled && (currentRide.paymentStatus || '').toUpperCase() !== 'PAID') {
+          throw new Error('Cannot assign driver to an unpaid scheduled trip.');
         }
 
         // Concurrency re-check: verify driver has not been concurrently assigned to an overlapping trip
@@ -783,6 +805,12 @@ export class AdminController {
               paymentMethod: updated.paymentMethod,
               customerName: updated.customer?.name || 'Customer',
               customerPhone: updated.customer?.phone || '',
+              riderName: (updated.stops as any)?.riderName || '',
+              riderPhone: (updated.stops as any)?.riderPhone || '',
+              passengerName: ((updated.stops as any)?.riderName && (updated.stops as any)?.riderName !== 'For me')
+                ? (updated.stops as any)?.riderName
+                : (updated.customer?.name || 'Customer'),
+              passengerPhone: (updated.stops as any)?.riderPhone || updated.customer?.phone || '',
               startOtp: pickupOtp,
               pickupLat: String(updated.pickupLat ?? 11.9360),
               pickupLng: String(updated.pickupLng ?? 79.8174),
@@ -1088,6 +1116,7 @@ export class AdminController {
 
         return {
           id: tx.id,
+          payoutCode: formatPayoutCode(tx.id),
           transactionId: tx.id,
           driverId: driver?.id ? formatDriverCode(driver.id) : 'DRV-0000',
           rawDriverId: driver?.id || '',

@@ -5,6 +5,7 @@ import { normalizePhone } from '../auth/auth.service';
 import { locationCacheService } from './location-cache.service';
 import { vehiclesService } from '../vehicles/vehicles.service';
 import { walletService } from '../wallet/wallet.service';
+import { socketService } from '../socket/socket.service';
 
 export class DriversService {
   async getDriverByUserId(userId: string) {
@@ -583,6 +584,7 @@ export class DriversService {
   async updateLocation(
     userId: string,
     data: {
+      updateId?: string;
       latitude: number;
       longitude: number;
       heading?: number;
@@ -604,6 +606,7 @@ export class DriversService {
     // Save to Redis / In-Memory cache and schedule periodic batch dump to PostgreSQL
     const cached = await locationCacheService.saveDriverLocation(driverId, {
       userId,
+      updateId: data.updateId,
       latitude: data.latitude,
       longitude: data.longitude,
       heading: data.heading,
@@ -613,11 +616,20 @@ export class DriversService {
       clientTimestamp: data.clientTimestamp ?? data.timestamp,
     });
 
+    // Real-time broadcast to Socket.IO subscribers (keeps WebSocket subscribers synced even on HTTP fallback)
+    // Suppress broadcast for duplicate or stale packets (Conditions 6 & 7)
+    if (!cached.isDuplicate && !cached.isStale) {
+      socketService.broadcastDriverLocation(driverId, cached);
+    }
+
     return {
       id: driverId,
       currentLatitude: cached.latitude,
       currentLongitude: cached.longitude,
       updatedAt: new Date(cached.updatedAt),
+      version: cached.version,
+      isDuplicate: !!cached.isDuplicate,
+      isStale: !!cached.isStale,
     };
   }
 

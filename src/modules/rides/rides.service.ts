@@ -177,6 +177,8 @@ export class RidesService {
     tollCharge?: number;
     additionalStops?: string[];
     stops?: any;
+    riderName?: string;
+    riderPhone?: string;
   }) {
     const clientDist = typeof data.distanceKm === 'number' && data.distanceKm > 0 ? Number(data.distanceKm.toFixed(1)) : undefined;
     const seatCapPre = data.seatCapacity || (data.requestedSeats?.includes('6') || data.requestedVehicle?.includes('6') ? 6 : 4);
@@ -316,6 +318,8 @@ export class RidesService {
             isElite: isElite,
             category: isElite ? 'ELITE' : (data.category || 'REGULAR'),
             additionalStops: cleanStops,
+            ...(data.riderName && data.riderName !== 'For me' ? { riderName: String(data.riderName).trim() } : {}),
+            ...(data.riderPhone ? { riderPhone: String(data.riderPhone).trim() } : {}),
           },
           fareBreakdown: {
             create: {
@@ -378,6 +382,12 @@ export class RidesService {
 
     return {
       ...ride,
+      riderName: (ride.stops as any)?.riderName || null,
+      riderPhone: (ride.stops as any)?.riderPhone || null,
+      passengerName: ((ride.stops as any)?.riderName && (ride.stops as any)?.riderName !== 'For me')
+        ? (ride.stops as any)?.riderName
+        : (ride.customer?.name || 'Customer'),
+      passengerPhone: (ride.stops as any)?.riderPhone || ride.customer?.phone || '',
       tripType: finalTripType,
       isElite,
       category: isElite ? 'ELITE' : (data.category || 'REGULAR'),
@@ -430,6 +440,12 @@ export class RidesService {
       throw new Error('Unauthorized: You are not the assigned driver for this ride');
     }
 
+    const meta = (ride.stops as any) || {};
+    const isScheduled = !!meta.isScheduled || (typeof meta.scheduledAt === 'string' && meta.scheduledAt.trim().length > 0);
+    if (isScheduled && (ride.paymentStatus || '').toUpperCase() !== 'PAID') {
+      throw new Error('Cannot accept an unpaid scheduled ride. Advance payment is required.');
+    }
+
     if (ride.status !== 'SEARCHING' && !(ride.status === 'ACCEPTED' && ride.driverId === driver.id)) {
       throw new Error('Ride is no longer available');
     }
@@ -476,6 +492,123 @@ export class RidesService {
   }
 
   /**
+   * Calculate cancellation policy, eligible refund, and cancellation fees based on 3-tier rules:
+   * Tier 1: Early Cancellation (>= 2h before scheduled pickup): 100% refund, ₹0 fee
+   * Tier 2: Last-Minute Cancellation (< 2h before scheduled pickup): 50% refund, 50% fee
+   * Tier 3: In-Transit / After Trip Start: 0% refund, 100% fee
+   * Unpaid / Instant ride: ₹0 refund, ₹0 fee
+   */
+  calculateCancellationPolicy(ride: any): {
+    isPaid: boolean;
+    totalFare: number;
+    eligibleRefund: number;
+    cancellationFee: number;
+    refundPercentage: number;
+    policyTier: 'EARLY_CANCELLATION' | 'LAST_MINUTE_CANCELLATION' | 'IN_TRANSIT' | 'UNPAID_STANDARD';
+    reason: string;
+  } {
+    const meta = (ride.stops as any) || {};
+    const isScheduled = !!meta.isScheduled || (typeof meta.scheduledAt === 'string' && meta.scheduledAt.trim().length > 0);
+    const isPaid = (ride.paymentStatus || '').toUpperCase() === 'PAID';
+    const totalFare = Number(ride.finalFare ?? ride.estimatedFare ?? (ride.fareBreakdown?.totalFare || 0));
+
+    if (ride.status === 'ONGOING' || ride.startedAt != null) {
+      return {
+        isPaid,
+        totalFare,
+        eligibleRefund: 0,
+        cancellationFee: totalFare,
+        refundPercentage: 0,
+        policyTier: 'IN_TRANSIT',
+        reason: 'Trip is already in progress. No refund is permitted for in-transit cancellations.',
+      };
+    }
+
+    if (!isPaid) {
+      return {
+        isPaid: false,
+        totalFare,
+        eligibleRefund: 0,
+        cancellationFee: 0,
+        refundPercentage: 0,
+        policyTier: 'UNPAID_STANDARD',
+        reason: 'Trip was not prepaid. No cancellation fee or refund applies.',
+      };
+    }
+
+    if (isScheduled && meta.scheduledAt) {
+      const scheduledTime = new Date(meta.scheduledAt).getTime();
+      const now = Date.now();
+      const diffHours = (scheduledTime - now) / (1000 * 60 * 60);
+
+      // Early cancellation: 2 hours or more before scheduled pickup time
+      if (diffHours >= 2) {
+        return {
+          isPaid: true,
+          totalFare,
+          eligibleRefund: totalFare,
+          cancellationFee: 0,
+          refundPercentage: 100,
+          policyTier: 'EARLY_CANCELLATION',
+          reason: 'Early cancellation (> 2 hours before scheduled pickup). 100% full advance refund.',
+        };
+      } else {
+        // Last-minute cancellation: within 2 hours of scheduled pickup time
+        const refundPercent = 50;
+        const refundAmount = Math.round((totalFare * (refundPercent / 100)) * 100) / 100;
+        const fee = Math.round((totalFare - refundAmount) * 100) / 100;
+        return {
+          isPaid: true,
+          totalFare,
+          eligibleRefund: refundAmount,
+          cancellationFee: fee,
+          refundPercentage: refundPercent,
+          policyTier: 'LAST_MINUTE_CANCELLATION',
+          reason: 'Last-minute cancellation (< 2 hours before scheduled pickup). 50% refund, 50% cancellation fee.',
+        };
+      }
+    }
+
+    // Instant prepaid ride cancelled before start
+    return {
+      isPaid: true,
+      totalFare,
+      eligibleRefund: totalFare,
+      cancellationFee: 0,
+      refundPercentage: 100,
+      policyTier: 'EARLY_CANCELLATION',
+      reason: 'Prepaid ride cancelled before driver started trip. 100% full refund.',
+    };
+  }
+
+  /**
+   * Fetch cancellation quote for a ride (used by customer app before confirming cancellation)
+   */
+  async getCancellationQuote(rideIdentifier: string) {
+    const cleanId = String(rideIdentifier || '').trim();
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanId);
+    const ride = await prisma.ride.findFirst({
+      where: {
+        OR: [
+          ...(isUuid ? [{ id: cleanId }] : []),
+          { bookingCode: cleanId },
+          { bookingCode: cleanId.replace(/^GC-/i, '') },
+          { bookingCode: `GC-${cleanId.replace(/^GC-/i, '')}` },
+        ],
+      },
+      include: {
+        fareBreakdown: true,
+      },
+    });
+
+    if (!ride) {
+      throw new Error('Ride not found');
+    }
+
+    return this.calculateCancellationPolicy(ride);
+  }
+
+  /**
    * Driver updates intermediate status: EN_ROUTE or ARRIVED, or cancel ride
    */
   async updateStatus(
@@ -483,7 +616,7 @@ export class RidesService {
     status: 'EN_ROUTE' | 'ARRIVED' | 'CANCELLED',
     actorRole: 'CUSTOMER' | 'DRIVER' | 'ADMIN',
     cancelReason?: string,
-    driverUserId?: string
+    actorUserId?: string
   ) {
     const allowedStatuses = ['EN_ROUTE', 'ARRIVED', 'CANCELLED'];
     if (!allowedStatuses.includes(status)) {
@@ -504,10 +637,14 @@ export class RidesService {
     });
     if (!ride) throw new Error('Ride not found');
 
-    // Enforce driver ownership on intermediate status updates
-    if (actorRole === 'DRIVER' && driverUserId) {
+    // Enforce actor authorization
+    if (actorRole === 'CUSTOMER' && actorUserId) {
+      if (ride.customerId !== actorUserId) {
+        throw new Error('Unauthorized: You are not authorized to modify or cancel this booking');
+      }
+    } else if (actorRole === 'DRIVER' && actorUserId) {
       const driver = await prisma.driverProfile.findUnique({
-        where: { userId: driverUserId },
+        where: { userId: actorUserId },
       });
       if (!driver || ride.driverId !== driver.id) {
         throw new Error('Unauthorized: You are not the assigned driver for this ride');
@@ -523,15 +660,76 @@ export class RidesService {
       throw new Error('Cannot change status of an already completed ride');
     }
 
+    if (status === 'CANCELLED' && ride.status === 'ONGOING') {
+      throw new Error('Cannot cancel a ride that is already in progress');
+    }
+
     let updated: any;
 
     if (status === 'CANCELLED') {
-      const metadata = (ride.stops as any) || {};
-      const couponCode = metadata.couponCode;
-      const alreadyRestored = metadata.couponRestored === true;
-
       updated = await prisma.$transaction(async (tx) => {
-        // Idempotently restore coupon usage if not already restored
+        // 1. Acquire pessimistic row-level lock inside transaction to eliminate race conditions
+        const locked = await tx.$queryRaw<any[]>`
+          SELECT "id" FROM "Ride"
+          WHERE "id" = ${cleanRideId}
+             OR "bookingCode" = ${cleanRideId}
+             OR "bookingCode" = ${`GC-${cleanRideId.replace(/^GC-/i, '')}`}
+             OR "bookingCode" = ${cleanRideId.replace(/^GC-/i, '')}
+          FOR UPDATE
+        `;
+
+        if (!locked.length) {
+          throw new Error('Ride not found');
+        }
+
+        const freshRide = await tx.ride.findUnique({
+          where: { id: locked[0].id },
+          include: {
+            customer: true,
+            fareBreakdown: true,
+            driver: { include: { user: true, wallet: true } },
+          },
+        });
+
+        if (!freshRide) {
+          throw new Error('Ride not found');
+        }
+
+        // 2. Strict authorization re-check on authoritative fresh state
+        if (actorRole === 'CUSTOMER' && actorUserId) {
+          if (freshRide.customerId !== actorUserId) {
+            throw new Error('Unauthorized: You are not authorized to modify or cancel this booking');
+          }
+        } else if (actorRole === 'DRIVER' && actorUserId) {
+          const driver = await tx.driverProfile.findUnique({
+            where: { userId: actorUserId },
+          });
+          if (!driver || freshRide.driverId !== driver.id) {
+            throw new Error('Unauthorized: You are not the assigned driver for this ride');
+          }
+        }
+
+        // 3. Idempotency guard: If ride is ALREADY cancelled, return immediately
+        if (freshRide.status === 'CANCELLED') {
+          return freshRide;
+        }
+
+        if (freshRide.status === 'COMPLETED') {
+          throw new Error('Cannot change status of an already completed ride');
+        }
+
+        if (freshRide.status === 'ONGOING') {
+          throw new Error('Cannot cancel a ride that is already in progress');
+        }
+
+        const metadata = (freshRide.stops as any) || {};
+        const couponCode = metadata.couponCode;
+        const alreadyRestored = metadata.couponRestored === true;
+
+        // 4. Calculate authoritative cancellation policy and eligible refund
+        const quote = this.calculateCancellationPolicy(freshRide);
+
+        // 5. Restore coupon idempotently if applicable
         if (couponCode && !alreadyRestored) {
           const { couponsService } = await import('../coupons/coupons.service');
           await couponsService.restoreCoupon(couponCode, tx);
@@ -545,19 +743,119 @@ export class RidesService {
             ? 'Cancelled by driver'
             : 'Cancelled by admin');
 
-        return tx.ride.update({
-          where: { id: ride.id },
+        // 6. Calculate 70% Driver Compensation and 30% Platform Share
+        let driverCompensation = 0;
+        let platformShare = quote.cancellationFee;
+
+        if (quote.cancellationFee > 0 && freshRide.driverId) {
+          driverCompensation = Math.round(quote.cancellationFee * 0.70 * 100) / 100;
+          platformShare = Math.round((quote.cancellationFee - driverCompensation) * 100) / 100;
+        }
+
+        // 7. Update FareBreakdown so admin financial aggregations immediately account for the 30% platform share
+        await tx.fareBreakdown.upsert({
+          where: { rideId: freshRide.id },
+          update: {
+            totalFare: quote.cancellationFee,
+            commissionAmount: platformShare,
+            driverAmount: driverCompensation,
+          },
+          create: {
+            rideId: freshRide.id,
+            distanceKm: freshRide.distanceKm || 0,
+            pricePerKm: 0,
+            baseFare: quote.cancellationFee,
+            totalFare: quote.cancellationFee,
+            commissionAmount: platformShare,
+            driverAmount: driverCompensation,
+          },
+        });
+
+        // 8. If driver compensation applies, record in Driver Wallet & Ledger idempotently
+        if (driverCompensation > 0 && freshRide.driverId) {
+          const existingCompensation = await tx.walletTransaction.findFirst({
+            where: {
+              wallet: { driverId: freshRide.driverId },
+              description: { contains: `booking #${freshRide.bookingCode}` },
+            },
+          });
+
+          if (!existingCompensation) {
+            const driverWallet = await tx.wallet.upsert({
+              where: { driverId: freshRide.driverId },
+              create: {
+                driverId: freshRide.driverId,
+                balance: driverCompensation,
+                lifetimeEarnings: driverCompensation,
+              },
+              update: {
+                balance: { increment: driverCompensation },
+                lifetimeEarnings: { increment: driverCompensation },
+              },
+            });
+
+            await tx.walletTransaction.create({
+              data: {
+                walletId: driverWallet.id,
+                amount: driverCompensation,
+                type: 'ADJUSTMENT',
+                status: 'COMPLETED',
+                description: `Cancellation compensation for booking #${freshRide.bookingCode} (70% driver share)`,
+              },
+            });
+          }
+        }
+
+        // 9. If ride was prepaid, auto-create a RefundRequest record with the calculated eligible amount
+        if (quote.isPaid && quote.eligibleRefund > 0) {
+          const existingRefund = await tx.refundRequest.findUnique({
+            where: { rideId: freshRide.id },
+          });
+
+          if (!existingRefund) {
+            await tx.refundRequest.create({
+              data: {
+                rideId: freshRide.id,
+                customerId: freshRide.customerId,
+                reason: `[${quote.policyTier}] ${quote.reason} (Customer cancelled: ${resolvedReason})`,
+                amount: quote.eligibleRefund,
+                status: 'SUBMITTED',
+                adminRemarks: quote.cancellationFee > 0
+                  ? `Cancellation fee deducted: ₹${quote.cancellationFee} (Driver 70%: ₹${driverCompensation}, Platform 30%: ₹${platformShare}). Eligible Refund: ₹${quote.eligibleRefund} (${quote.refundPercentage}%).`
+                  : `100% full refund of ₹${quote.eligibleRefund} authorized per early cancellation policy.`,
+              },
+            });
+          }
+        }
+
+        // 10. Update ride status to CANCELLED and store full cancellation accounting
+        const cancelledRide = await tx.ride.update({
+          where: { id: freshRide.id },
           data: {
             status: 'CANCELLED',
             cancelReason: resolvedReason,
             cancelledBy: actorRole.toLowerCase(),
-            stops: couponCode ? { ...metadata, couponRestored: true } : ride.stops as any,
+            stops: {
+              ...(couponCode ? { ...metadata, couponRestored: true } : metadata),
+              cancellationQuote: quote,
+              cancellationAccounting: {
+                totalFare: quote.totalFare,
+                eligibleRefund: quote.eligibleRefund,
+                cancellationFee: quote.cancellationFee,
+                driverCompensation,
+                platformShare,
+                refundPercentage: quote.refundPercentage,
+                cancelledAt: new Date().toISOString(),
+              },
+            },
           },
           include: {
             customer: true,
             driver: { include: { user: true } },
           },
         });
+
+        return cancelledRide;
       });
     } else {
       updated = await prisma.ride.update({
@@ -1194,6 +1492,10 @@ export class RidesService {
         assignedVehicleId: safeRide.vehicleId || safeRide.vehicle?.id || driver.assignedVehicleId || null,
         assignedVehicleNumber: safeRide.vehicle?.vehicleNumber || driver.assignedVehicle?.vehicleNumber || null,
         assignedVehicleModel: safeRide.vehicle?.model || driver.assignedVehicle?.model || null,
+        riderName: meta.riderName || null,
+        riderPhone: meta.riderPhone || null,
+        passengerName: (meta.riderName && meta.riderName !== 'For me') ? meta.riderName : (safeRide.customer?.name || 'Customer'),
+        passengerPhone: meta.riderPhone || safeRide.customer?.phone || '',
         tripType: finalTripType,
         isElite,
         category: isElite ? 'ELITE' : (meta.category || 'REGULAR'),
@@ -1301,6 +1603,10 @@ export class RidesService {
         bookingCode: r.bookingCode,
         customerName: r.customer?.name || 'Customer',
         customerPhone: r.customer?.phone || '',
+        riderName: meta.riderName || null,
+        riderPhone: meta.riderPhone || null,
+        passengerName: (meta.riderName && meta.riderName !== 'For me') ? meta.riderName : (r.customer?.name || 'Customer'),
+        passengerPhone: meta.riderPhone || r.customer?.phone || '',
         customerRating: 4.8,
         pickupLocation: r.pickupLocation,
         pickupAddress: r.pickupAddress || r.pickupLocation,

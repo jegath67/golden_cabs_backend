@@ -7,7 +7,7 @@
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "seed": "tsx prisma/seed.ts",
-    "build": "tsc"
+    "build": "prisma generate && tsc"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -29,12 +29,14 @@
     "ioredis": "^6.0.0",
     "pg": "^8.23.1",
     "prisma": "^7.10.0",
-    "razorpay": "^2.9.8"
+    "razorpay": "^2.9.8",
+    "socket.io": "^4.8.4",
+    "tsx": "^4.23.15"
   },
   "devDependencies": {
     "@types/node": "^26.6.4",
     "@types/pg": "^8.23.1",
-    "tsx": "^4.23.15",
+    "socket.io-client": "^4.8.4",
     "typescript": "^7.0.2"
   }
 }

@@ -67,6 +67,16 @@ export class RidesController {
     }
   }
 
+  async getCancellationQuote(req: FastifyRequest<any>, reply: FastifyReply) {
+    const { id } = req.params as { id: string };
+    try {
+      const quote = await ridesService.getCancellationQuote(id);
+      return reply.send({ success: true, data: quote });
+    } catch (error: any) {
+      return reply.status(400).send({ success: false, message: error.message || 'Failed to get cancellation quote' });
+    }
+  }
+
   async startRide(req: FastifyRequest<any>, reply: FastifyReply) {
     const { id } = req.params as { id: string };
     const { otp } = (req.body as { otp?: string }) || {};
