@@ -39,20 +39,20 @@ export function normalizePhone(phone: string): string {
 }
 
 /**
- * Strict check for development environment.
+ * Strict check for development / test environment OTP.
  * Default is ALWAYS secure/production if NODE_ENV is unset, empty, 'production', 'staging', or 'test'.
- * Development test OTP is ONLY permitted when NODE_ENV is explicitly 'development'
- * and not overridden by DISABLE_DEV_OTP=true.
+ * When ENABLE_TEST_OTP=true is explicitly set, test OTP (123456) is permitted even in production/staging.
+ * DISABLE_DEV_OTP=true takes absolute precedence and disables test OTP under all conditions.
  */
 export function isDevOtpEnabled(): boolean {
-  const env = (process.env.NODE_ENV || '').trim().toLowerCase();
-  if (env !== 'development') {
-    return false;
-  }
   if (process.env.DISABLE_DEV_OTP === 'true') {
     return false;
   }
-  return true;
+  if (process.env.ENABLE_TEST_OTP === 'true') {
+    return true;
+  }
+  const env = (process.env.NODE_ENV || '').trim().toLowerCase();
+  return env === 'development';
 }
 
 export class AuthService {
