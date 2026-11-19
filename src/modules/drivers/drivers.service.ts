@@ -578,6 +578,21 @@ export class DriversService {
       locationCacheService.flushDriverImmediately(driver.id).catch(() => {});
     }
 
+    // Broadcast driver status update to admin fleet room
+    try {
+      socketService.broadcastDriverStatus({
+        driverId: updatedProfile.id,
+        userId: updatedProfile.userId,
+        isOnline: updatedProfile.isOnline,
+        shiftStatus: updatedProfile.shiftStatus,
+        personaType: updatedProfile.personaType,
+        approvalStatus: updatedProfile.approvalStatus,
+        assignedVehicleId: updatedProfile.assignedVehicleId,
+      });
+    } catch (err) {
+      console.error('[DriversService] Error broadcasting driver status update:', err);
+    }
+
     return updatedProfile;
   }
 
@@ -770,6 +785,20 @@ export class DriversService {
       }
     }
 
+    try {
+      socketService.broadcastDriverStatus({
+        driverId: driver.id,
+        userId: driver.userId,
+        isOnline: driver.isOnline,
+        shiftStatus: driver.shiftStatus,
+        personaType: driver.personaType,
+        approvalStatus: driver.approvalStatus,
+        assignedVehicleId: driver.assignedVehicleId,
+      });
+    } catch (err) {
+      console.error('[DriversService] Error broadcasting driver status on verifyDriver:', err);
+    }
+
     return driver;
   }
 
@@ -834,6 +863,20 @@ export class DriversService {
           saveToDb: true,
         }).catch((err) => console.error('Error notifying driver of deactivation:', err));
       }
+    }
+
+    try {
+      socketService.broadcastDriverStatus({
+        driverId: updatedProfile.id,
+        userId: updatedProfile.userId,
+        isOnline: updatedProfile.isOnline,
+        shiftStatus: updatedProfile.shiftStatus,
+        personaType: updatedProfile.personaType,
+        approvalStatus: updatedProfile.approvalStatus,
+        assignedVehicleId: updatedProfile.assignedVehicleId,
+      });
+    } catch (err) {
+      console.error('[DriversService] Error broadcasting driver status on updateDriverStatus:', err);
     }
 
     return updatedProfile;

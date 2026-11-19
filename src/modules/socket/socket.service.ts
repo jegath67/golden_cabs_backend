@@ -403,6 +403,33 @@ export class SocketService {
   }
 
   /**
+   * Broadcasts driver shift/online/availability status transitions.
+   * Emitted to authorized admin fleet room.
+   */
+  broadcastDriverStatus(driverData: {
+    driverId: string;
+    userId: string;
+    isOnline: boolean;
+    shiftStatus: 'ON_SHIFT' | 'OFF_SHIFT' | string;
+    personaType?: string;
+    approvalStatus?: string;
+    assignedVehicleId?: string | null;
+    driver?: any;
+  }) {
+    if (!this.io) return;
+
+    const payload = {
+      ...driverData,
+      timestamp: Date.now(),
+    };
+
+    this.io.to('admin_live_fleet').emit('driver_status_updated', payload);
+    console.log(
+      `[Socket.IO] Broadcasted driver_status_updated to admin_live_fleet for driver ${driverData.driverId} (isOnline: ${driverData.isOnline}, shiftStatus: ${driverData.shiftStatus})`
+    );
+  }
+
+  /**
    * Returns the underlying SocketIOServer instance.
    */
   getIO(): SocketIOServer | null {
