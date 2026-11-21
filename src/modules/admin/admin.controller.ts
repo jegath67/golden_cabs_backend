@@ -8,6 +8,7 @@ import {
   resolveRideCommissionFromRecord,
   getLedgerTxMapForRides,
 } from '../pricing-slabs/pricing-slabs.service';
+import { socketService } from '../socket/socket.service';
 
 function formatDriverCode(driverId?: string | null): string | null {
   if (!driverId) return null;
@@ -719,7 +720,7 @@ export class AdminController {
       const updated = await prisma.$transaction(async (tx) => {
         const currentRide = await tx.ride.findUnique({
           where: { id: ride.id },
-          select: { id: true, status: true, driverId: true, paymentStatus: true },
+          select: { id: true, status: true, driverId: true, paymentStatus: true, stops: true },
         });
 
         if (!currentRide) {
@@ -728,6 +729,10 @@ export class AdminController {
 
         if (currentRide.status === 'COMPLETED' || currentRide.status === 'CANCELLED') {
           throw new Error(`Ride status is already ${currentRide.status}`);
+        }
+
+        if ((currentRide.status === 'ACCEPTED' || currentRide.status === 'ARRIVED' || currentRide.status === 'ONGOING') && !(req.body as any)?.forceReassign) {
+          throw new Error(`Cannot reassign ride in ${currentRide.status} status. Driver has already accepted this ride.`);
         }
 
         if (targetRide.isScheduled && (currentRide.paymentStatus || '').toUpperCase() !== 'PAID') {
@@ -743,12 +748,20 @@ export class AdminController {
           throw new Error(`CONCURRENCY_CONFLICT: ${recheckAvailability.reasonMessage}`);
         }
 
+        const existingStops = (currentRide.stops && typeof currentRide.stops === 'object') ? (currentRide.stops as any) : {};
+        const updatedStops = {
+          ...existingStops,
+          assignedAt: new Date().toISOString(),
+          assignmentExpiresAt: new Date(Date.now() + 120000).toISOString(),
+        };
+
         return tx.ride.update({
           where: { id: ride.id },
           data: {
             driverId: finalDriverId,
             vehicleId: finalVehicleId,
             status: assignStatus,
+            stops: updatedStops,
           },
           include: {
             customer: { select: { id: true, name: true, phone: true } },
@@ -762,6 +775,13 @@ export class AdminController {
             fareBreakdown: true,
           },
         });
+      });
+
+      // Broadcast socket status transition to live fleet & tracking rooms
+      socketService.broadcastRideStatus(updated.id, updated.status, {
+        assignedDriverId: finalDriverId,
+        assignedVehicleId: finalVehicleId,
+        assignedAt: new Date().toISOString(),
       });
 
       // 5. Send push notifications:
@@ -861,6 +881,75 @@ export class AdminController {
         success: false,
         message: error.message || 'Failed to assign driver',
         error: String(error),
+      });
+    }
+  }
+
+  async unassignRide(req: FastifyRequest<any>, reply: FastifyReply) {
+    try {
+      const { id } = req.params as { id: string };
+      const cleanRideId = String(id).trim();
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanRideId);
+
+      const ride = await prisma.ride.findFirst({
+        where: {
+          OR: [
+            ...(isUuid ? [{ id: cleanRideId }] : []),
+            { bookingCode: cleanRideId },
+            { bookingCode: cleanRideId.replace(/^GC-/i, '') },
+            { bookingCode: `GC-${cleanRideId.replace(/^GC-/i, '')}` },
+          ],
+        },
+      });
+
+      if (!ride) {
+        return reply.status(404).send({ success: false, message: 'Ride not found' });
+      }
+
+      if (ride.status === 'COMPLETED' || ride.status === 'CANCELLED') {
+        return reply.status(400).send({ success: false, message: `Cannot unassign ride in ${ride.status} status` });
+      }
+
+      const force = !!(req.body as any)?.force;
+      if ((ride.status === 'ACCEPTED' || ride.status === 'ARRIVED' || ride.status === 'ONGOING') && !force) {
+        return reply.status(400).send({
+          success: false,
+          message: `Cannot unassign ride in ${ride.status} status without force approval.`,
+        });
+      }
+
+      const existingStops = (ride.stops && typeof ride.stops === 'object') ? (ride.stops as any) : {};
+      const { assignedAt, assignmentExpiresAt, ...cleanedStops } = existingStops;
+
+      const updated = await prisma.ride.update({
+        where: { id: ride.id },
+        data: {
+          driverId: null,
+          vehicleId: null,
+          status: 'SEARCHING',
+          stops: cleanedStops,
+        },
+        include: {
+          customer: { select: { id: true, name: true, phone: true } },
+          fareBreakdown: true,
+        },
+      });
+
+      socketService.broadcastRideStatus(updated.id, 'SEARCHING', {
+        unassigned: true,
+        previousDriverId: ride.driverId,
+      });
+
+      return reply.send({
+        success: true,
+        message: 'Driver unassigned successfully. Ride reverted to SEARCHING.',
+        data: formatRideResponse(updated),
+      });
+    } catch (error: any) {
+      req.log.error(error);
+      return reply.status(500).send({
+        success: false,
+        message: error.message || 'Failed to unassign ride',
       });
     }
   }

@@ -6,6 +6,7 @@ export async function authRoutes(app: FastifyInstance) {
   // Public routes
   app.post('/send-otp', authController.sendOtp.bind(authController));
   app.post('/verify-otp', authController.verifyOtp.bind(authController));
+  app.post('/driver/register', authController.registerDriver.bind(authController));
   app.post('/admin-login', authController.adminLogin.bind(authController));
   app.post('/driver-login', authController.driverLogin.bind(authController));
   app.post('/reset-password', authController.resetPassword.bind(authController));

@@ -5,6 +5,7 @@ import { unavailabilityService } from '../unavailability/unavailability.service'
 import { locationCacheService } from '../drivers/location-cache.service';
 import { vehiclesService } from '../vehicles/vehicles.service';
 import { TripStatus } from '../../generated/prisma/client';
+import { socketService } from '../socket/socket.service';
 import { standardizeTripType } from '../../utils/trip-type.helper';
 import {
   pricingSlabsService,
@@ -348,13 +349,13 @@ export class RidesService {
     // are queued for Admin dispatch and availability validation.
     // Drivers receive assignment notifications ONLY after Admin assigns them.
 
-    // Send instant booking confirmation with Pickup OTP to the customer
+    // Send instant booking request receipt with Pickup OTP to the customer
     notificationsService.sendToUser({
       userId: customerId,
-      title: isScheduledBooking ? '📅 Ride Scheduled Successfully!' : '🚖 Cab Booking Confirmed!',
+      title: isScheduledBooking ? '📅 Ride Scheduled Successfully!' : '🚖 Ride Request Received!',
       message: isScheduledBooking
         ? `Your trip for ${scheduledDisplayStr || 'scheduled time'} is confirmed. Your Pickup OTP is ${startOtp}.`
-        : `Your ride request (${bookingCode}) is confirmed. Your Pickup OTP is ${startOtp}.`,
+        : `Your ride request (${bookingCode}) has been received. Assigning nearby driver...`,
       type: 'ride_created',
       data: {
         rideId: ride.id,
@@ -428,58 +429,74 @@ export class RidesService {
       throw new Error(`Cannot accept ride: You or your vehicle are scheduled unavailable today (${targetRideDateStr}).`);
     }
 
-    const ride = await prisma.ride.findFirst({
-      where: {
-        OR: [{ id: rideId }, { bookingCode: rideId }],
-      },
-    });
-    if (!ride) throw new Error('Ride not found');
-
-    // Strict Admin-Controlled Dispatch: Only the assigned driver can accept this ride
-    if (!ride.driverId || ride.driverId !== driver.id) {
-      throw new Error('Unauthorized: You are not the assigned driver for this ride');
-    }
-
-    const meta = (ride.stops as any) || {};
-    const isScheduled = !!meta.isScheduled || (typeof meta.scheduledAt === 'string' && meta.scheduledAt.trim().length > 0);
-    if (isScheduled && (ride.paymentStatus || '').toUpperCase() !== 'PAID') {
-      throw new Error('Cannot accept an unpaid scheduled ride. Advance payment is required.');
-    }
-
-    if (ride.status !== 'SEARCHING' && !(ride.status === 'ACCEPTED' && ride.driverId === driver.id)) {
-      throw new Error('Ride is no longer available');
-    }
-
-    const updatedRide = await prisma.ride.update({
-      where: { id: ride.id },
-      data: {
-        driverId: driver.id,
-        vehicleId: driver.assignedVehicleId || ride.vehicleId,
-        status: 'ACCEPTED',
-      },
-      include: {
-        customer: { select: { id: true, name: true, phone: true } },
-        driver: {
-          include: {
-            user: { select: { name: true, phone: true } },
-            assignedVehicle: true,
-          },
+    const updatedRide = await prisma.$transaction(async (tx) => {
+      const currentRide = await tx.ride.findFirst({
+        where: {
+          OR: [{ id: rideId }, { bookingCode: rideId }],
         },
-        vehicle: true,
-        fareBreakdown: true,
-      },
+      });
+      if (!currentRide) throw new Error('Ride not found');
+
+      // Strict Admin-Controlled Dispatch: Only the assigned driver can accept this ride
+      if (!currentRide.driverId || currentRide.driverId !== driver.id) {
+        throw new Error('Unauthorized: You are not the assigned driver for this ride');
+      }
+
+      const meta = (currentRide.stops as any) || {};
+      const isScheduled = !!meta.isScheduled || (typeof meta.scheduledAt === 'string' && meta.scheduledAt.trim().length > 0);
+      if (isScheduled && (currentRide.paymentStatus || '').toUpperCase() !== 'PAID') {
+        throw new Error('Cannot accept an unpaid scheduled ride. Advance payment is required.');
+      }
+
+      if (currentRide.status !== 'SEARCHING' && !(currentRide.status === 'ACCEPTED' && currentRide.driverId === driver.id)) {
+        throw new Error('Ride is no longer available');
+      }
+
+      // Assignment Expiry Guard: 120 seconds limit from assignment
+      const assignedAtTime = meta.assignedAt ? new Date(meta.assignedAt).getTime() : (currentRide.updatedAt ? new Date(currentRide.updatedAt).getTime() : null);
+      if (assignedAtTime && (Date.now() - assignedAtTime > 120000)) {
+        throw new Error('Assignment expired: Driver offer has timed out (exceeded 120 seconds).');
+      }
+
+      return tx.ride.update({
+        where: { id: currentRide.id },
+        data: {
+          driverId: driver.id,
+          vehicleId: driver.assignedVehicleId || currentRide.vehicleId,
+          status: 'ACCEPTED',
+        },
+        include: {
+          customer: { select: { id: true, name: true, phone: true } },
+          driver: {
+            include: {
+              user: { select: { name: true, phone: true } },
+              assignedVehicle: true,
+            },
+          },
+          vehicle: true,
+          fareBreakdown: true,
+        },
+      });
+    });
+
+    // Broadcast socket event to tracking room & admin fleet room
+    socketService.broadcastRideStatus(updatedRide.id, 'ACCEPTED', {
+      driverId: driver.id,
+      driverName: updatedRide.driver?.user?.name || 'Driver',
+      vehicleModel: updatedRide.vehicle?.model || updatedRide.driver?.assignedVehicle?.model,
+      vehicleNumber: updatedRide.vehicle?.vehicleNumber || updatedRide.driver?.assignedVehicle?.vehicleNumber,
     });
 
     // Notify Customer that driver accepted, prominently featuring Pickup OTP
     notificationsService.sendToUser({
-      userId: ride.customerId,
+      userId: updatedRide.customerId,
       title: '✅ Ride Accepted by Driver!',
-      message: `${updatedRide.driver?.user.name || 'Your driver'} is on the way. Your Pickup OTP is ${ride.startOtp}. Share with driver to start trip.`,
+      message: `${updatedRide.driver?.user.name || 'Your driver'} is on the way. Your Pickup OTP is ${updatedRide.startOtp}. Share with driver to start trip.`,
       type: 'ride_accepted',
       data: {
-        rideId: ride.id,
-        bookingCode: ride.bookingCode || '',
-        startOtp: ride.startOtp,
+        rideId: updatedRide.id,
+        bookingCode: updatedRide.bookingCode || '',
+        startOtp: updatedRide.startOtp,
       },
     }).catch((e) => console.error('Customer notification error:', e));
 
@@ -488,6 +505,82 @@ export class RidesService {
       assignedVehicleId: updatedRide.vehicleId || updatedRide.vehicle?.id || updatedRide.driver?.assignedVehicleId || null,
       assignedVehicleNumber: updatedRide.vehicle?.vehicleNumber || updatedRide.driver?.assignedVehicle?.vehicleNumber || null,
       assignedVehicleModel: updatedRide.vehicle?.model || updatedRide.driver?.assignedVehicle?.model || null,
+    };
+  }
+
+  /**
+   * Driver declines/rejects a ride assignment.
+   * Atomically records rejection, clears driverId, reverts to SEARCHING,
+   * and notifies live tracking & admin dispatch.
+   */
+  async declineRide(driverUserId: string, rideId: string, reason?: string) {
+    const driver = await prisma.driverProfile.findUnique({
+      where: { userId: driverUserId },
+    });
+    if (!driver) throw new Error('Driver profile not found');
+
+    const cleanRideId = String(rideId).trim();
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanRideId);
+
+    const updatedRide = await prisma.$transaction(async (tx) => {
+      const ride = await tx.ride.findFirst({
+        where: {
+          OR: [
+            ...(isUuid ? [{ id: cleanRideId }] : []),
+            { bookingCode: cleanRideId },
+            { bookingCode: cleanRideId.replace(/^GC-/i, '') },
+            { bookingCode: `GC-${cleanRideId.replace(/^GC-/i, '')}` },
+          ],
+        },
+      });
+      if (!ride) throw new Error('Ride not found');
+
+      if (ride.driverId !== driver.id) {
+        throw new Error('Unauthorized: You are not the assigned driver for this ride');
+      }
+
+      if (ride.status !== 'SEARCHING') {
+        throw new Error(`Cannot decline ride in ${ride.status} status`);
+      }
+
+      const meta = (ride.stops as any) || {};
+      const rejectedList = Array.isArray(meta.rejectedDriverIds) ? [...meta.rejectedDriverIds] : [];
+      if (!rejectedList.includes(driver.id)) {
+        rejectedList.push(driver.id);
+      }
+      const updatedMeta = {
+        ...meta,
+        rejectedDriverIds: rejectedList,
+        declineReason: reason || 'Declined by driver',
+        declinedAt: new Date().toISOString(),
+      };
+      delete (updatedMeta as any).assignedAt;
+      delete (updatedMeta as any).assignmentExpiresAt;
+
+      return tx.ride.update({
+        where: { id: ride.id },
+        data: {
+          driverId: null,
+          vehicleId: null,
+          status: 'SEARCHING',
+          stops: updatedMeta,
+        },
+        include: {
+          customer: { select: { id: true, name: true, phone: true } },
+          fareBreakdown: true,
+        },
+      });
+    });
+
+    socketService.broadcastRideStatus(updatedRide.id, 'SEARCHING', {
+      declinedDriverId: driver.id,
+      reason: reason || 'Declined by driver',
+      unassigned: true,
+    });
+
+    return {
+      success: true,
+      message: 'Ride assignment declined successfully. Reverted to searching.',
     };
   }
 
@@ -868,6 +961,13 @@ export class RidesService {
       });
     }
 
+    // Broadcast status change via Socket.IO
+    socketService.broadcastRideStatus(updated.id, status, {
+      driverId: updated.driverId,
+      status,
+      cancelReason: status === 'CANCELLED' ? (updated.cancelReason || cancelReason) : undefined,
+    });
+
     // Notify other party
     if (status === 'EN_ROUTE') {
       const driverName = updated.driver?.user?.name || 'Your driver';
@@ -988,6 +1088,10 @@ export class RidesService {
         status: 'ONGOING',
         startedAt: new Date(),
       },
+    });
+
+    socketService.broadcastRideStatus(updated.id, 'ONGOING', {
+      startedAt: updated.startedAt,
     });
 
     notificationsService.sendToUser({
@@ -1142,6 +1246,12 @@ export class RidesService {
 
     // Invalidate active ride location cache immediately
     locationCacheService.invalidateRideValidation(updatedRide.id).catch(() => {});
+
+    // Broadcast status change via Socket.IO
+    socketService.broadcastRideStatus(updatedRide.id, 'COMPLETED', {
+      finalFare: updatedRide.finalFare,
+      completedAt: updatedRide.completedAt,
+    });
 
     // Send notifications to Customer and Driver
     notificationsService.sendToUser({

@@ -30,6 +30,7 @@ import { schedulerService } from './modules/scheduler/scheduler.service';
 import { initRedis, isRedisAvailable, disconnectRedis } from './config/redis';
 import { locationCacheService } from './modules/drivers/location-cache.service';
 import { socketService } from './modules/socket/socket.service';
+import { isCloudinaryConfigured, uploadBufferToCloudinary } from './config/cloudinary';
 
 const uploadsDir = process.env.UPLOADS_DIR
   ? path.resolve(process.env.UPLOADS_DIR)
@@ -78,15 +79,37 @@ app.get('/uploads/:filename', async (req, reply) => {
   return reply.type(contentType).send(stream);
 });
 
-// Public image upload endpoint (accepts base64 or file buffer payload)
+// Public image and document upload endpoint with size & MIME validation
+const MAX_UPLOAD_SIZE_MB = parseInt(process.env.MAX_UPLOAD_SIZE_MB || '10', 10);
+const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
+
+function detectMimeAndExtension(buffer: Buffer): { mime: string; ext: string } | null {
+  if (buffer.length >= 3 && buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) {
+    return { mime: 'image/jpeg', ext: '.jpg' };
+  }
+  if (buffer.length >= 8 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
+    return { mime: 'image/png', ext: '.png' };
+  }
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+  ) {
+    return { mime: 'image/webp', ext: '.webp' };
+  }
+  if (buffer.length >= 5 && buffer.subarray(0, 5).toString('ascii') === '%PDF-') {
+    return { mime: 'application/pdf', ext: '.pdf' };
+  }
+  return null;
+}
+
 app.post('/api/upload', async (req, reply) => {
   try {
     const body = (req.body as any) || {};
     let base64Data = body.base64 || body.file;
-    let originalName = body.filename || 'upload.jpg';
 
     if (!base64Data || typeof base64Data !== 'string') {
-      return reply.status(400).send({ success: false, message: 'Base64 image data is required' });
+      return reply.status(400).send({ success: false, message: 'Base64 image or document data is required' });
     }
 
     // Strip data URI prefix if present (e.g. data:image/jpeg;base64,...)
@@ -94,16 +117,57 @@ app.post('/api/upload', async (req, reply) => {
       base64Data = base64Data.split(';base64,')[1];
     }
 
-    const ext = path.extname(originalName) || '.jpg';
-    const uniqueName = `doc_${Date.now()}_${crypto.randomBytes(6).toString('hex')}${ext}`;
+    const buffer = Buffer.from(base64Data, 'base64');
+
+    // 1. Validate empty payload
+    if (buffer.length === 0) {
+      return reply.status(400).send({ success: false, message: 'Uploaded file payload is empty' });
+    }
+
+    // 2. Validate max upload size
+    if (buffer.length > MAX_UPLOAD_SIZE_BYTES) {
+      return reply.status(413).send({
+        success: false,
+        message: `File size (${(buffer.length / (1024 * 1024)).toFixed(2)} MB) exceeds maximum allowed limit of ${MAX_UPLOAD_SIZE_MB} MB`,
+      });
+    }
+
+    // 3. Validate real MIME type via magic bytes
+    const detected = detectMimeAndExtension(buffer);
+    if (!detected) {
+      return reply.status(400).send({
+        success: false,
+        message: 'Unsupported file format. Only JPEG, PNG, WebP, and PDF documents are permitted.',
+      });
+    }
+
+    // 4. Generate collision-resistant secure filename
+    // 4. Generate collision-resistant secure filename
+    const uniqueName = `doc_${Date.now()}_${crypto.randomBytes(6).toString('hex')}${detected.ext}`;
     const destinationPath = path.join(uploadsDir, uniqueName);
 
-    const buffer = Buffer.from(base64Data, 'base64');
     fs.writeFileSync(destinationPath, buffer);
 
     const protocol = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'http';
     const host = req.headers.host || 'localhost:3000';
-    const fileUrl = `${protocol}://${host}/uploads/${uniqueName}`;
+    let fileUrl = `${protocol}://${host}/uploads/${uniqueName}`;
+
+    // 5. Permanent Cloudinary storage upload if configured
+    if (isCloudinaryConfigured()) {
+      try {
+        const publicId = uniqueName.replace(/\.[^/.]+$/, '');
+        const cloudResult = await uploadBufferToCloudinary(buffer, {
+          folder: 'golden_cabs/uploads',
+          publicId,
+          resourceType: detected.mime === 'application/pdf' ? 'raw' : 'image',
+        });
+        if (cloudResult && cloudResult.url) {
+          fileUrl = cloudResult.url;
+        }
+      } catch (cloudErr) {
+        console.error('[Upload] Cloudinary upload error, using local fallback:', cloudErr);
+      }
+    }
 
     return reply.send({
       success: true,
@@ -111,6 +175,9 @@ app.post('/api/upload', async (req, reply) => {
       data: {
         filename: uniqueName,
         url: fileUrl,
+        sizeBytes: buffer.length,
+        sizeKb: Math.round(buffer.length / 1024),
+        mimeType: detected.mime,
       },
     });
   } catch (error: any) {

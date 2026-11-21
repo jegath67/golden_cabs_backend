@@ -749,6 +749,13 @@ export class DriversService {
     });
 
     if (approvalStatus === 'APPROVED') {
+      if (driver.userId) {
+        await prisma.user.update({
+          where: { id: driver.userId },
+          data: { isActive: true },
+        });
+      }
+
       await prisma.vehicle.updateMany({
         where: {
           OR: [
@@ -772,6 +779,18 @@ export class DriversService {
         }).catch((err) => console.error('Error notifying driver of approval:', err));
       }
     } else if (approvalStatus === 'REJECTED') {
+      if (driver.userId) {
+        await prisma.user.update({
+          where: { id: driver.userId },
+          data: { isActive: false },
+        });
+      }
+
+      await prisma.driverProfile.update({
+        where: { id: driverProfileId },
+        data: { isOnline: false, shiftStatus: 'OFF_SHIFT' },
+      });
+
       if (driver.userId) {
         await notificationsService.sendToUser({
           userId: driver.userId,

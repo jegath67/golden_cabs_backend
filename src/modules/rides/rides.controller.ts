@@ -52,6 +52,20 @@ export class RidesController {
     }
   }
 
+  async declineRide(req: FastifyRequest<any>, reply: FastifyReply) {
+    const user = req.user as { id: string };
+    const { id } = req.params as { id: string };
+    const body = (req.body as any) || {};
+    const reason = body.reason || body.cancelReason;
+
+    try {
+      const result = await ridesService.declineRide(user.id, id, reason);
+      return reply.send({ success: true, message: result.message, data: result });
+    } catch (error: any) {
+      return reply.status(400).send({ success: false, message: error.message || 'Failed to decline ride' });
+    }
+  }
+
   async updateStatus(req: FastifyRequest<any>, reply: FastifyReply) {
     const user = req.user as { id: string; role: 'CUSTOMER' | 'DRIVER' | 'ADMIN' };
     const { id } = req.params as { id: string };

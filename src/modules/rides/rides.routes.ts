@@ -27,6 +27,13 @@ export async function ridesRoutes(app: FastifyInstance) {
     ridesController.acceptRide.bind(ridesController)
   );
 
+  // Driver declines a ride
+  app.post(
+    '/:id/decline',
+    { preHandler: [requireRoles(['DRIVER'])] },
+    ridesController.declineRide.bind(ridesController)
+  );
+
   // Status updates: en_route, arrived, cancelled
   app.patch(
     '/:id/status',

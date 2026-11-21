@@ -3,9 +3,11 @@ import type { UserRole } from '../generated/prisma/enums';
 import { prisma } from '../config/prisma';
 
 export interface JwtPayload {
-  id: string;
+  id?: string;
   phone: string;
   role: UserRole;
+  name?: string;
+  purpose?: string;
 }
 
 declare module '@fastify/jwt' {

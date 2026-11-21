@@ -292,32 +292,50 @@ export class AuthService {
 
     let isNewUser = false;
 
+    // Strict separation for DRIVER role:
+    // A driver must NOT be created as a database record upon simple OTP verification.
+    // If user does not exist or has no driver profile, return isNewUser: true
+    // so controller can generate a short-lived registrationToken.
+    if (role === 'DRIVER') {
+      if (!user || !user.driverProfile) {
+        return {
+          user: null,
+          isNewUser: true,
+          phone: cleanPhone,
+          name: name && name.trim().length > 0 ? name.trim() : '',
+        };
+      }
+
+      // Existing registered driver logging in
+      if (name && name.trim().length > 0 && user.name === 'New Driver') {
+        user = await prisma.user.update({
+          where: { id: user.id },
+          data: { name: name.trim() },
+          include: {
+            customerProfile: true,
+            driverProfile: true,
+          },
+        });
+      }
+
+      return {
+        user,
+        isNewUser: false,
+        phone: cleanPhone,
+        name: user.name,
+      };
+    }
+
     if (!user) {
       isNewUser = true;
       user = await prisma.user.create({
         data: {
           phone: cleanPhone,
-          name: name && name.trim().length > 0 ? name.trim() : (role === 'DRIVER' ? 'New Driver' : 'New Customer'),
-          role,
-          customerProfile:
-            role === 'CUSTOMER'
-              ? {
-                  create: {},
-                }
-              : undefined,
-          driverProfile:
-            role === 'DRIVER'
-              ? {
-                  create: {
-                    personaType: 'DRIVE_ONLY',
-                    wallet: {
-                      create: {
-                        balance: 0,
-                      },
-                    },
-                  },
-                }
-              : undefined,
+          name: name && name.trim().length > 0 ? name.trim() : 'New Customer',
+          role: 'CUSTOMER',
+          customerProfile: {
+            create: {},
+          },
         },
         include: {
           customerProfile: true,
@@ -326,14 +344,11 @@ export class AuthService {
       });
     } else {
       const updates: any = {};
-      if (name && name.trim().length > 0 && (user.name === 'New Driver' || user.name === 'New Customer')) {
+      if (name && name.trim().length > 0 && user.name === 'New Customer') {
         updates.name = name.trim();
       }
       if (user.phone !== cleanPhone) {
         updates.phone = cleanPhone;
-      }
-      if (role === 'DRIVER' && user.role !== 'DRIVER' && user.role !== 'ADMIN' && user.role !== 'SUPER_ADMIN') {
-        updates.role = 'DRIVER';
       }
       if (Object.keys(updates).length > 0) {
         await prisma.user.update({
@@ -343,21 +358,9 @@ export class AuthService {
       }
 
       // If user exists but role profile is missing, create it
-      if (role === 'CUSTOMER' && !user.customerProfile) {
+      if (!user.customerProfile) {
         await prisma.customerProfile.create({
           data: { userId: user.id },
-        });
-      } else if (role === 'DRIVER' && !user.driverProfile) {
-        await prisma.driverProfile.create({
-          data: {
-            userId: user.id,
-            personaType: 'DRIVE_ONLY',
-            wallet: {
-              create: {
-                balance: 0,
-              },
-            },
-          },
         });
       }
 
@@ -377,6 +380,8 @@ export class AuthService {
     return {
       user,
       isNewUser,
+      phone: cleanPhone,
+      name: user.name,
     };
   }
 
@@ -751,6 +756,291 @@ export class AuthService {
         },
       });
     });
+  }
+
+  /**
+   * Complete atomic Driver Registration after OTP verification.
+   * Verifies the short-lived registrationToken, validates mandatory fields,
+   * checks for duplicate mobile numbers, and atomically creates the User (isActive: false),
+   * DriverProfile (approvalStatus: PENDING, shiftStatus: OFF_SHIFT), Vehicle (PENDING, if applicable),
+   * and Wallet records.
+   */
+  async completeDriverRegistration(
+    data: any,
+    jwtVerifier: (token: string) => any,
+    jwtSigner: (payload: any) => string
+  ) {
+    const { registrationToken } = data || {};
+    if (!registrationToken) {
+      const err: any = new Error('Registration token is required. Please verify your mobile number first.');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    let decoded: any;
+    try {
+      decoded = jwtVerifier(registrationToken);
+    } catch (e: any) {
+      const err: any = new Error('Invalid or expired registration token. Please verify OTP again.');
+      err.statusCode = 401;
+      throw err;
+    }
+
+    if (decoded.purpose !== 'DRIVER_REGISTRATION' || decoded.role !== 'DRIVER') {
+      const err: any = new Error('Invalid token purpose for driver registration');
+      err.statusCode = 403;
+      throw err;
+    }
+
+    const cleanPhone = normalizePhone(decoded.phone);
+    if (!cleanPhone || cleanPhone.length < 10) {
+      const err: any = new Error('Valid phone number not found in registration token');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const name = (data.name || decoded.name || '').trim();
+    if (!name || name.length < 2) {
+      const err: any = new Error('Full name is required for registration');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const licenseNumber = (data.licenseNumber || '').trim();
+    if (!licenseNumber) {
+      const err: any = new Error('Driving licence number is required');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    let normalizedPersona: 'DRIVE_ONLY' | 'OWN_VEHICLE' | 'RENTAL' = 'DRIVE_ONLY';
+    const rawPersona = (data.personaType || '').toUpperCase();
+    if (rawPersona === 'OWN_VEHICLE' || rawPersona === 'DRIVER_AND_VEHICLE') {
+      normalizedPersona = 'OWN_VEHICLE';
+    } else if (rawPersona === 'RENTAL' || rawPersona === 'VEHICLE_ONLY' || rawPersona === 'VEHICLEPROVIDER') {
+      normalizedPersona = 'RENTAL';
+    }
+
+    // Check for duplicate driver registration
+    const existingUser = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { phone: cleanPhone },
+          { phone: `+91${cleanPhone}` },
+          { phone: `91${cleanPhone}` },
+        ],
+      },
+      include: { driverProfile: true },
+    });
+
+    if (existingUser && existingUser.driverProfile) {
+      const err: any = new Error('A driver account with this mobile number already exists. Please login.');
+      err.statusCode = 409;
+      throw err;
+    }
+
+    // Parse vehicle details if provided
+    const vehicleData = data.vehicle;
+    let vNumber = '';
+    if (vehicleData) {
+      vNumber = (vehicleData.regNumber || vehicleData.rcNumber || vehicleData.vehicleNumber || '').toUpperCase().trim();
+      if (vNumber) {
+        const existingVehicle = await prisma.vehicle.findUnique({
+          where: { vehicleNumber: vNumber },
+        });
+        if (existingVehicle) {
+          const err: any = new Error(`Vehicle number ${vNumber} is already registered in the system.`);
+          err.statusCode = 409;
+          throw err;
+        }
+      }
+    }
+
+    // Atomic transaction for Driver creation
+    const result = await prisma.$transaction(async (tx) => {
+      // 1. Create or update User
+      let user: any;
+      if (existingUser) {
+        user = await tx.user.update({
+          where: { id: existingUser.id },
+          data: {
+            name,
+            role: 'DRIVER',
+            isActive: false, // Inactive until Admin approval
+          },
+        });
+      } else {
+        user = await tx.user.create({
+          data: {
+            phone: cleanPhone,
+            name,
+            role: 'DRIVER',
+            isActive: false, // Inactive until Admin approval
+          },
+        });
+      }
+
+      // 2. Create Driver Profile
+      const driverProfile = await tx.driverProfile.create({
+        data: {
+          userId: user.id,
+          personaType: normalizedPersona,
+          approvalStatus: 'PENDING',
+          shiftStatus: 'OFF_SHIFT',
+          isOnline: false,
+          licenseNumber: licenseNumber,
+          licenseExpiry: data.licenseExpiry || null,
+          licenseFront: data.licenseFront || null,
+          licenseBack: data.licenseBack || null,
+          aadharNumber: data.aadharNumber || null,
+          aadharFront: data.aadharFront || null,
+          aadharBack: data.aadharBack || null,
+          panNumber: data.panNumber || null,
+          panImage: data.panImage || null,
+          selfieImage: data.selfieImage || null,
+          assignedHubId: data.assignedHubId || null,
+        },
+      });
+
+      // 3. Create Vehicle if persona requires vehicle or vehicle data is provided
+      let createdVehicle: any = null;
+      if (vNumber && (normalizedPersona === 'OWN_VEHICLE' || normalizedPersona === 'RENTAL')) {
+        let vehicleTypeEnum: any = 'SEDAN';
+        const rawType = (vehicleData.vehicleType || vehicleData.seaterType || '').toString().toUpperCase();
+        if (rawType.includes('SUV')) vehicleTypeEnum = 'SUV';
+        else if (rawType.includes('HATCHBACK')) vehicleTypeEnum = 'HATCHBACK';
+        else if (rawType.includes('LUXURY')) vehicleTypeEnum = 'LUXURY';
+        else if (rawType.includes('AUTO')) vehicleTypeEnum = 'AUTO';
+
+        let fuelTypeEnum: any = 'PETROL';
+        const rawFuel = (vehicleData.fuelType || '').toString().toUpperCase();
+        if (rawFuel.includes('DIESEL')) fuelTypeEnum = 'DIESEL';
+        else if (rawFuel.includes('ELECTRIC') || rawFuel.includes('EV')) fuelTypeEnum = 'ELECTRIC';
+        else if (rawFuel.includes('CNG')) fuelTypeEnum = 'CNG';
+
+        let gearTypeEnum: any = 'MANUAL';
+        const rawGear = (vehicleData.gearType || '').toString().toUpperCase();
+        if (rawGear.includes('AUTO')) gearTypeEnum = 'AUTOMATIC';
+
+        const rawYear = parseInt(vehicleData.year, 10);
+        const yearInt = isNaN(rawYear) || rawYear < 1990 ? new Date().getFullYear() : rawYear;
+
+        const photoUrls: string[] = [];
+        if (vehicleData.vehiclePhoto && typeof vehicleData.vehiclePhoto === 'string') {
+          photoUrls.push(vehicleData.vehiclePhoto);
+        }
+        if (Array.isArray(vehicleData.photos)) {
+          for (const p of vehicleData.photos) {
+            if (p && typeof p === 'string' && !photoUrls.includes(p)) {
+              photoUrls.push(p);
+            }
+          }
+        }
+
+        createdVehicle = await tx.vehicle.create({
+          data: {
+            vehicleNumber: vNumber,
+            brand: vehicleData.brand || 'Vehicle',
+            model: vehicleData.model || 'Model',
+            year: yearInt,
+            vehicleType: vehicleTypeEnum,
+            category: 'BUDGET',
+            fuelType: fuelTypeEnum,
+            gearType: gearTypeEnum,
+            seatCapacity: parseInt(vehicleData.seaterType, 10) || 4,
+            status: 'PENDING',
+            isOnline: false,
+            rcNumber: vehicleData.rcNumber || vNumber,
+            rcExpiry: vehicleData.rcExpiry || null,
+            rcFront: vehicleData.rcFront || null,
+            rcBack: vehicleData.rcBack || null,
+            insuranceNumber: vehicleData.insuranceNumber || null,
+            insuranceExpiry: vehicleData.insuranceExpiry || null,
+            insuranceDoc: vehicleData.insuranceDoc || null,
+            owner: { connect: { id: driverProfile.id } },
+            ...(data.assignedHubId ? { assignedHub: { connect: { id: data.assignedHubId } } } : {}),
+            ...(photoUrls.length > 0
+              ? {
+                  photos: {
+                    create: photoUrls.map((url, i) => ({
+                      photoUrl: url,
+                      tag: i === 0 ? 'front' : 'extra',
+                    })),
+                  },
+                }
+              : {}),
+          },
+        });
+
+        if (normalizedPersona === 'OWN_VEHICLE') {
+          await tx.driverProfile.update({
+            where: { id: driverProfile.id },
+            data: { assignedVehicleId: createdVehicle.id },
+          });
+        }
+      }
+
+      // 4. Create Driver Wallet with Bank Details
+      const bank = data.bankDetails || {};
+      const wallet = await tx.wallet.create({
+        data: {
+          driverId: driverProfile.id,
+          balance: 0,
+          bankAccountNumber: bank.bankAccountNumber || bank.accountNo || null,
+          bankIfsc: bank.bankIfsc || bank.ifsc || null,
+          bankHolderName: bank.bankHolderName || bank.accountHolderName || name,
+          bankName: bank.bankName || null,
+        },
+      });
+
+      return {
+        user,
+        driverProfile: {
+          ...driverProfile,
+          assignedVehicleId: createdVehicle && normalizedPersona === 'OWN_VEHICLE' ? createdVehicle.id : null,
+        },
+        vehicle: createdVehicle,
+        wallet,
+      };
+    });
+
+    // Notify Admin (Unified Single Notification)
+    try {
+      const vehInfo = result.vehicle
+        ? ` with vehicle ${result.vehicle.brand} ${result.vehicle.model} (${result.vehicle.vehicleNumber})`
+        : '';
+      await notificationsService.sendToAdmins({
+        title: '📋 Driver Registration Submitted',
+        message: `${name} (${cleanPhone}) registered as ${normalizedPersona}${vehInfo} & submitted documents for Admin approval.`,
+        type: 'admin_driver_registered',
+        data: {
+          driverId: result.driverProfile.id,
+          userId: result.user.id,
+          ...(result.vehicle?.id ? { vehicleId: result.vehicle.id } : {}),
+          personaType: normalizedPersona,
+        },
+      });
+    } catch (notifErr) {
+      console.error('[AuthService] Error sending admin notification on driver register:', notifErr);
+    }
+
+    // Generate JWT token for newly registered driver (isVerified: false)
+    const token = jwtSigner({
+      id: result.user.id,
+      phone: result.user.phone,
+      role: result.user.role,
+    });
+
+    return {
+      token,
+      user: {
+        ...result.user,
+        driverProfile: result.driverProfile,
+      },
+      vehicle: result.vehicle,
+      isVerified: false,
+      approvalStatus: 'PENDING',
+    };
   }
 }
 

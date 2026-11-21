@@ -38,14 +38,41 @@ export class AuthController {
     }
 
     try {
-      const { user, isNewUser } = await authService.verifyOtpAndLogin(
+      const result = await authService.verifyOtpAndLogin(
         phone,
         otp,
         role,
         name
       );
 
-      // Generate JWT Token using Fastify JWT instance
+      if (role === 'DRIVER' && result.isNewUser) {
+        // For new drivers: do NOT create DB records; issue short-lived registration token
+        const registrationPhone = (result.phone || phone) as string;
+        const registrationToken = req.server.jwt.sign(
+          {
+            phone: registrationPhone,
+            name: result.name || '',
+            role: 'DRIVER',
+            purpose: 'DRIVER_REGISTRATION',
+          },
+          { expiresIn: '2h' }
+        );
+
+        return reply.send({
+          success: true,
+          message: 'Mobile number verified successfully. Please complete driver registration.',
+          data: {
+            token: '',
+            registrationToken,
+            phone: registrationPhone,
+            user: null,
+            isNewUser: true,
+          },
+        });
+      }
+
+      // Existing driver or customer
+      const user = result.user!;
       const token = req.server.jwt.sign({
         id: user.id,
         phone: user.phone,
@@ -54,17 +81,39 @@ export class AuthController {
 
       return reply.send({
         success: true,
-        message: isNewUser ? 'Account created successfully' : 'Login successful',
+        message: result.isNewUser ? 'Account created successfully' : 'Login successful',
         data: {
           token,
           user,
-          isNewUser,
+          isNewUser: result.isNewUser,
         },
       });
     } catch (error: any) {
       return reply.status(400).send({
         success: false,
         message: error.message || 'OTP verification failed',
+      });
+    }
+  }
+
+  async registerDriver(req: FastifyRequest<any>, reply: FastifyReply) {
+    try {
+      const result = await authService.completeDriverRegistration(
+        req.body,
+        (token: string) => req.server.jwt.verify(token),
+        (payload: any) => req.server.jwt.sign(payload)
+      );
+
+      return reply.send({
+        success: true,
+        message: 'Driver registration submitted successfully. Awaiting admin review.',
+        data: result,
+      });
+    } catch (error: any) {
+      const statusCode = error.statusCode || 400;
+      return reply.status(statusCode).send({
+        success: false,
+        message: error.message || 'Driver registration failed',
       });
     }
   }
