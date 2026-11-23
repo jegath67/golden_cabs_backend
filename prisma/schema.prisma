@@ -141,6 +141,11 @@ enum RefundStatus {
   REJECTED
 }
 
+enum FavoriteItemType {
+  CAR
+  EXPLORE
+}
+
 // -------------------------------------------------------------
 // USER & PROFILES
 // -------------------------------------------------------------
@@ -166,6 +171,7 @@ model User {
   notifications   Notification[]
   deviceTokens    DeviceToken[]
   savedCars       SavedCar[]
+  favorites       CustomerFavorite[] @relation("CustomerFavorites")
   ridesAsCustomer   Ride[]          @relation("CustomerRides")
   refundRequests    RefundRequest[]
   customerWallet    CustomerWallet?
@@ -554,6 +560,19 @@ model SavedCar {
   createdAt  DateTime @default(now())
 
   @@unique([customerId, vehicleId])
+}
+
+model CustomerFavorite {
+  id         String           @id @default(uuid())
+  customerId String
+  customer   User             @relation("CustomerFavorites", fields: [customerId], references: [id], onDelete: Cascade)
+  itemType   FavoriteItemType
+  itemId     String
+  createdAt  DateTime         @default(now())
+
+  @@unique([customerId, itemType, itemId])
+  @@index([customerId])
+  @@index([itemType, itemId])
 }
 
 // -------------------------------------------------------------
