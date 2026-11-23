@@ -1,6 +1,7 @@
 import { vehiclesService } from '../vehicles/vehicles.service';
 import { prisma } from '../../config/prisma';
 import { notificationsService } from '../notifications/notifications.service';
+import { socketService } from '../socket/socket.service';
 import { TripStatus } from '../../generated/prisma/client';
 
 interface SchedulerStatus {
@@ -20,6 +21,7 @@ class SchedulerService {
   private lastSkippedCount = 0;
   private isProcessing = false;
   private isCheckingExpiredRides = false;
+  private isCheckingExpiredAssignments = false;
 
   /**
    * Initialize the scheduler at server boot
@@ -31,20 +33,22 @@ class SchedulerService {
     // Default lastRunDate to today so it only triggers at upcoming midnight, not on midday reboot
     this.lastRunDate = istDate;
 
-    console.log(`[SchedulerService] Initialized. Background tasks armed for vehicle reset & scheduled trip auto-expiry.`);
+    console.log(`[SchedulerService] Initialized. Background tasks armed for vehicle reset, scheduled trip auto-expiry & driver assignment expiry.`);
 
     // Layer 2: Run server-startup catch-up check to clean any expired allocations from previous days
     this.runStartupCatchUpReset();
 
-    // Check every 60 seconds
+    // Check every 30 seconds for responsive 120s driver assignment timeouts & scheduled checks
     this.timer = setInterval(() => {
       this.checkAndRunMidnightReset();
       this.checkAndExpireUnassignedScheduledRides();
-    }, 60 * 1000);
+      this.checkAndExpireDriverAssignments();
+    }, 30 * 1000);
 
     // Initial check in case server started precisely at 00:00 or pending expired rides exist
     this.checkAndRunMidnightReset();
     this.checkAndExpireUnassignedScheduledRides();
+    this.checkAndExpireDriverAssignments();
   }
 
   stop() {
@@ -279,6 +283,143 @@ class SchedulerService {
       console.error('[SchedulerService] Error running checkAndExpireUnassignedScheduledRides:', err);
     } finally {
       this.isCheckingExpiredRides = false;
+    }
+  }
+
+  /**
+   * Auto-releases expired driver assignments (120-second timeout)
+   * If a ride is in SEARCHING status, has an assigned driver, and stops.assignmentExpiresAt <= now:
+   * 1. Re-verifies state atomically in database transaction (ensuring status is still SEARCHING and driverId still matches).
+   * 2. Clears driverId and vehicleId, reverting to unassigned SEARCHING state.
+   * 3. Cleans up assignmentExpiresAt and records driver in timeoutDriverIds.
+   * 4. Broadcasts realtime status transition to live fleet and customer rooms.
+   */
+  async checkAndExpireDriverAssignments() {
+    if (this.isCheckingExpiredAssignments) return;
+    this.isCheckingExpiredAssignments = true;
+
+    try {
+      const now = new Date();
+
+      // Find candidate rides: SEARCHING with an assigned driver
+      const candidateRides = await prisma.ride.findMany({
+        where: {
+          status: TripStatus.SEARCHING,
+          driverId: { not: null },
+        },
+        select: {
+          id: true,
+          bookingCode: true,
+          driverId: true,
+          vehicleId: true,
+          stops: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+
+      for (const ride of candidateRides) {
+        if (!ride.driverId) continue;
+
+        const meta = (ride.stops && typeof ride.stops === 'object') ? (ride.stops as any) : {};
+        if (!meta.assignmentExpiresAt) {
+          // Do not expire rides without a valid assignment expiry timestamp
+          continue;
+        }
+
+        const expiresAtTime = new Date(meta.assignmentExpiresAt).getTime();
+        if (isNaN(expiresAtTime) || expiresAtTime > now.getTime()) {
+          // Not expired yet
+          continue;
+        }
+
+        const targetDriverId = ride.driverId;
+        const bookingDisplay = ride.bookingCode || ride.id;
+
+        console.log(`[SchedulerService] Assignment expired for ride ${bookingDisplay} (Driver: ${targetDriverId}). Releasing assignment back to dispatch pool.`);
+
+        // Atomic transaction with race protection
+        const releaseSucceeded = await prisma.$transaction(async (tx) => {
+          const freshRide = await tx.ride.findUnique({
+            where: { id: ride.id },
+            select: { id: true, status: true, driverId: true, stops: true },
+          });
+
+          if (!freshRide) return false;
+
+          // Strict verification: Ride must STILL be in SEARCHING and STILL assigned to the same driver
+          if (freshRide.status !== TripStatus.SEARCHING || freshRide.driverId !== targetDriverId) {
+            console.log(`[SchedulerService] Concurrency detected for ride ${bookingDisplay}: Driver ${targetDriverId} is no longer assigned or status changed to ${freshRide.status}. Skipping release.`);
+            return false;
+          }
+
+          const existingStops = (freshRide.stops && typeof freshRide.stops === 'object') ? { ...(freshRide.stops as any) } : {};
+          const { assignedAt, assignmentExpiresAt, ...cleanedStops } = existingStops;
+
+          // Record timeout history
+          const timeoutList = Array.isArray(cleanedStops.timeoutDriverIds)
+            ? [...cleanedStops.timeoutDriverIds]
+            : [];
+          if (!timeoutList.includes(targetDriverId)) {
+            timeoutList.push(targetDriverId);
+          }
+          cleanedStops.timeoutDriverIds = timeoutList;
+          cleanedStops.lastTimedOutDriverId = targetDriverId;
+          cleanedStops.lastTimedOutAt = new Date().toISOString();
+
+          // Conditional update
+          const updateResult = await tx.ride.updateMany({
+            where: {
+              id: ride.id,
+              status: TripStatus.SEARCHING,
+              driverId: targetDriverId,
+            },
+            data: {
+              driverId: null,
+              vehicleId: null,
+              status: TripStatus.SEARCHING,
+              stops: cleanedStops,
+            },
+          });
+
+          return updateResult.count > 0;
+        });
+
+        if (releaseSucceeded) {
+          // Realtime event broadcast
+          socketService.broadcastRideStatus(ride.id, TripStatus.SEARCHING, {
+            unassigned: true,
+            previousDriverId: targetDriverId,
+            reason: 'Assignment offer expired (120s timeout)',
+          });
+
+          // Send notification to the timed-out driver so their app dismisses the offer
+          try {
+            const dp = await prisma.driverProfile.findUnique({
+              where: { id: targetDriverId },
+              select: { userId: true },
+            });
+            if (dp?.userId) {
+              await notificationsService.sendToUser({
+                userId: dp.userId,
+                title: '⏱️ Assignment Offer Expired',
+                message: `Assignment offer for ride ${bookingDisplay} has expired and returned to dispatch pool.`,
+                type: 'assignment_expired',
+                data: {
+                  rideId: ride.id,
+                  bookingCode: bookingDisplay,
+                },
+              });
+            }
+          } catch (notifErr) {
+            console.error(`[SchedulerService] Failed to send offer expired notification to driver ${targetDriverId}:`, notifErr);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[SchedulerService] Error running checkAndExpireDriverAssignments:', err);
+    } finally {
+      this.isCheckingExpiredAssignments = false;
     }
   }
 

@@ -1638,9 +1638,6 @@ export class RidesService {
       }
     }
 
-    // Driver-specific assignments window: up to 24 hours
-    const assignedCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
-
     // CRITICAL: Unassigned rides (driverId == null) are NEVER sent to drivers.
     // Drivers only receive rides specifically assigned to them by Admin.
     const orConditions: any[] = [];
@@ -1686,6 +1683,21 @@ export class RidesService {
       if (isScheduled && !r.driverId && !r.vehicleId) {
         return false;
       }
+
+      // Expired SEARCHING assignments are not returned as valid assigned offers
+      if (r.status === TripStatus.SEARCHING) {
+        if (meta.assignmentExpiresAt) {
+          const expiresAtTime = new Date(meta.assignmentExpiresAt).getTime();
+          if (!isNaN(expiresAtTime) && expiresAtTime <= Date.now()) {
+            return false;
+          }
+        }
+        // Prevent the same timed-out driver from immediately receiving the same offer again
+        if (driverProfileId && Array.isArray(meta.timeoutDriverIds) && meta.timeoutDriverIds.includes(driverProfileId)) {
+          return false;
+        }
+      }
+
       return true;
     });
 
