@@ -3,6 +3,8 @@ import { prisma } from '../../config/prisma';
 import { notificationsService } from '../notifications/notifications.service';
 import { socketService } from '../socket/socket.service';
 import { TripStatus } from '../../generated/prisma/client';
+import { driverAvailabilityService } from '../rides/driver-availability.service';
+import { standardizeTripType } from '../../utils/trip-type.helper';
 
 interface SchedulerStatus {
   isRunning: boolean;
@@ -322,6 +324,12 @@ class SchedulerService {
         if (!ride.driverId) continue;
 
         const meta = (ride.stops && typeof ride.stops === 'object') ? (ride.stops as any) : {};
+        const isScheduled = !!meta.isScheduled || (typeof meta.scheduledAt === 'string' && meta.scheduledAt.trim().length > 0);
+        if (isScheduled) {
+          // Scheduled advance bookings are unaffected by the 120s immediate driver assignment timeout
+          continue;
+        }
+
         if (!meta.assignmentExpiresAt) {
           // Do not expire rides without a valid assignment expiry timestamp
           continue;
@@ -386,13 +394,6 @@ class SchedulerService {
         });
 
         if (releaseSucceeded) {
-          // Realtime event broadcast
-          socketService.broadcastRideStatus(ride.id, TripStatus.SEARCHING, {
-            unassigned: true,
-            previousDriverId: targetDriverId,
-            reason: 'Assignment offer expired (120s timeout)',
-          });
-
           // Send notification to the timed-out driver so their app dismisses the offer
           try {
             const dp = await prisma.driverProfile.findUnique({
@@ -413,6 +414,150 @@ class SchedulerService {
             }
           } catch (notifErr) {
             console.error(`[SchedulerService] Failed to send offer expired notification to driver ${targetDriverId}:`, notifErr);
+          }
+
+          // Automatic Next-Driver Dispatch attempt
+          let autoRedispatched = false;
+          try {
+            const candidates = await driverAvailabilityService.getCandidateDriversForRide(ride.id);
+            const latestRide = await prisma.ride.findUnique({
+              where: { id: ride.id },
+              include: {
+                customer: { select: { id: true, name: true, phone: true } },
+                fareBreakdown: true,
+              },
+            });
+
+            if (latestRide && latestRide.status === TripStatus.SEARCHING && latestRide.driverId === null) {
+              const latestMeta = (latestRide.stops && typeof latestRide.stops === 'object') ? (latestRide.stops as any) : {};
+              const currentTimeoutIds: string[] = Array.isArray(latestMeta.timeoutDriverIds) ? latestMeta.timeoutDriverIds : [];
+              const rejectedIds: string[] = Array.isArray(latestMeta.rejectedDriverIds) ? latestMeta.rejectedDriverIds : [];
+
+              // Find next eligible candidate who hasn't already timed out or rejected this ride, and is not the target driver being released
+              const nextCandidate = candidates.availableDrivers.find(
+                (c) => c.driverId && c.driverId !== targetDriverId && !currentTimeoutIds.includes(c.driverId) && !rejectedIds.includes(c.driverId)
+              );
+
+              if (nextCandidate && nextCandidate.driverId) {
+                const nextDriverId = nextCandidate.driverId;
+                const nextVehicleId = nextCandidate.vehicle?.id || nextCandidate.driver?.assignedVehicleId || null;
+
+                const assignedNow = new Date();
+                const assignedExpires = new Date(assignedNow.getTime() + 120000);
+
+                const assignedStops = {
+                  ...latestMeta,
+                  assignedAt: assignedNow.toISOString(),
+                  assignmentExpiresAt: assignedExpires.toISOString(),
+                };
+
+                // Atomic conditional assignment
+                const redispatchSucceeded = await prisma.$transaction(async (tx) => {
+                  const checkRide = await tx.ride.findUnique({
+                    where: { id: ride.id },
+                    select: { status: true, driverId: true },
+                  });
+                  if (!checkRide || checkRide.status !== TripStatus.SEARCHING || checkRide.driverId !== null) {
+                    return false;
+                  }
+
+                  const updateRes = await tx.ride.updateMany({
+                    where: {
+                      id: ride.id,
+                      status: TripStatus.SEARCHING,
+                      driverId: null,
+                    },
+                    data: {
+                      driverId: nextDriverId,
+                      vehicleId: nextVehicleId,
+                      status: TripStatus.SEARCHING,
+                      stops: assignedStops,
+                    },
+                  });
+
+                  return updateRes.count > 0;
+                });
+
+                if (redispatchSucceeded) {
+                  autoRedispatched = true;
+                  console.log(`[SchedulerService] Auto-redispatched ride ${bookingDisplay} to next eligible driver ${nextDriverId}.`);
+
+                  // Broadcast socket status for new assignment
+                  socketService.broadcastRideStatus(ride.id, TripStatus.SEARCHING, {
+                    assignedDriverId: nextDriverId,
+                    assignedVehicleId: nextVehicleId,
+                    assignedAt: assignedNow.toISOString(),
+                  });
+
+                  // Send push notification to newly assigned driver
+                  try {
+                    const nextDp = await prisma.driverProfile.findUnique({
+                      where: { id: nextDriverId },
+                      select: { userId: true },
+                    });
+                    if (nextDp?.userId) {
+                      const smartCode = latestRide.bookingCode || `GC-${latestRide.id.replace(/-/g, '').substring(0, 6).toUpperCase()}`;
+                      const pickupOtp = latestRide.startOtp || '';
+
+                      await notificationsService.sendToUser({
+                        userId: nextDp.userId,
+                        title: '🚖 New Trip Assigned!',
+                        message: `You have been assigned ride ${smartCode}. Open app to accept.`,
+                        type: 'ride_assigned',
+                        data: {
+                          rideId: latestRide.id,
+                          bookingCode: smartCode,
+                          pickupLocation: latestRide.pickupLocation,
+                          pickupAddress: latestRide.pickupAddress || latestRide.pickupLocation,
+                          dropLocation: latestRide.dropLocation,
+                          dropAddress: latestRide.dropAddress || latestRide.dropLocation,
+                          distance: `${latestRide.distanceKm} km`,
+                          estimatedFare: `₹${Math.round(latestRide.fareBreakdown?.totalFare ?? latestRide.estimatedFare ?? 0)}`,
+                          tripType: standardizeTripType({
+                            customTripType: (latestRide.stops as any)?.customTripType,
+                            tripType: latestRide.tripType,
+                            distanceKm: latestRide.distanceKm,
+                          }),
+                          isElite: String(!!(
+                            (latestRide.stops as any)?.isElite ||
+                            (latestRide.stops as any)?.category === 'ELITE' ||
+                            (latestRide.stops as any)?.requestedVehicle?.toLowerCase().includes('elite') ||
+                            latestRide.tripType?.toLowerCase().includes('elite')
+                          )),
+                          paymentMethod: latestRide.paymentMethod,
+                          customerName: latestRide.customer?.name || 'Customer',
+                          customerPhone: latestRide.customer?.phone || '',
+                          riderName: (latestRide.stops as any)?.riderName || '',
+                          riderPhone: (latestRide.stops as any)?.riderPhone || '',
+                          passengerName: ((latestRide.stops as any)?.riderName && (latestRide.stops as any)?.riderName !== 'For me')
+                            ? (latestRide.stops as any)?.riderName
+                            : (latestRide.customer?.name || 'Customer'),
+                          passengerPhone: (latestRide.stops as any)?.riderPhone || latestRide.customer?.phone || '',
+                          startOtp: pickupOtp,
+                          pickupLat: String(latestRide.pickupLat ?? 11.9360),
+                          pickupLng: String(latestRide.pickupLng ?? 79.8174),
+                          dropLat: String(latestRide.dropLat ?? 11.9680),
+                          dropLng: String(latestRide.dropLng ?? 79.8105),
+                        },
+                      });
+                    }
+                  } catch (pushErr) {
+                    console.error(`[SchedulerService] Failed to send push notification to redispatched driver ${nextDriverId}:`, pushErr);
+                  }
+                }
+              }
+            }
+          } catch (redispatchErr) {
+            console.error(`[SchedulerService] Error evaluating candidates for redispatch on ride ${bookingDisplay}:`, redispatchErr);
+          }
+
+          if (!autoRedispatched) {
+            // No next candidate available: broadcast unassigned status to live fleet & tracking
+            socketService.broadcastRideStatus(ride.id, TripStatus.SEARCHING, {
+              unassigned: true,
+              previousDriverId: targetDriverId,
+              reason: 'Assignment offer expired (120s timeout)',
+            });
           }
         }
       }

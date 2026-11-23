@@ -75,6 +75,10 @@ function formatRideResponse(r: any) {
   const meta = (r.stops as any) || {};
   const isScheduled = !!meta.isScheduled && !!meta.scheduledAt;
 
+  const nowMs = Date.now();
+  const assignmentExpiresAtMs = meta.assignmentExpiresAt ? new Date(meta.assignmentExpiresAt).getTime() : null;
+  const isAssignmentExpired = assignmentExpiresAtMs !== null && !isNaN(assignmentExpiresAtMs) && assignmentExpiresAtMs <= nowMs;
+
   let displayStatus = 'New Request';
   const cancelReasonLower = (r.cancelReason || '').toLowerCase();
   const isAutoExpired = isScheduled && (
@@ -83,14 +87,14 @@ function formatRideResponse(r: any) {
     cancelReasonLower.includes('auto-cancel')
   );
 
-  const isPendingOver30Mins = isScheduled && !r.driverId && r.status === 'SEARCHING' && r.createdAt && (Date.now() - new Date(r.createdAt).getTime()) >= 30 * 60 * 1000;
+  const isPendingOver30Mins = isScheduled && !r.driverId && r.status === 'SEARCHING' && r.createdAt && (nowMs - new Date(r.createdAt).getTime()) >= 30 * 60 * 1000;
 
   if (isAutoExpired || isPendingOver30Mins) {
     displayStatus = 'TIME EXPIRED';
   } else if (isScheduled && !r.driverId && r.status === 'SEARCHING') {
     displayStatus = 'Scheduled';
   } else if (r.status === 'SEARCHING') {
-    displayStatus = r.driverId ? 'Assigned' : 'New Request';
+    displayStatus = (r.driverId && !isAssignmentExpired) ? 'Assigned' : 'New Request';
   } else if (r.status === 'ACCEPTED') {
     displayStatus = 'Accepted';
   } else if (['EN_ROUTE', 'ARRIVED', 'ONGOING'].includes(r.status)) {
@@ -126,11 +130,13 @@ function formatRideResponse(r: any) {
   const seatCap = meta.seatCapacity ? String(meta.seatCapacity) : (meta.requestedVehicle?.includes('6') ? '6' : '4');
   const reqVehicle = meta.requestedVehicle || (seatCap === '6' ? '6 Seater Cab' : '4 Seater Cab');
 
-  const rawDriverId = r.driver?.id || r.driverId || null;
-  const driverCode = formatDriverCode(rawDriverId);
+  // If ride is in SEARCHING and assignment has expired or unassigned, do not expose driver/vehicle details
+  const hasActiveAssignment = r.status !== 'SEARCHING' || (r.driverId && !isAssignmentExpired);
+  const rawDriverId = hasActiveAssignment ? (r.driver?.id || r.driverId || null) : null;
+  const driverCode = rawDriverId ? formatDriverCode(rawDriverId) : null;
 
   // Extract real assigned vehicle information
-  const vehicleObj = r.vehicle || r.driver?.assignedVehicle || null;
+  const vehicleObj = hasActiveAssignment ? (r.vehicle || r.driver?.assignedVehicle || null) : null;
   const assignedVehicleNumber = vehicleObj?.vehicleNumber || null;
   const assignedVehicleModel = vehicleObj?.model || vehicleObj?.brand || null;
 
@@ -156,11 +162,13 @@ function formatRideResponse(r: any) {
     passengerPhone: meta.riderPhone || r.customer?.phone || '',
     requestedVehicleId: reqVehicle,
     requestedSeatCount: seatCap,
+    assignedAt: meta.assignedAt || null,
+    assignmentExpiresAt: meta.assignmentExpiresAt || null,
     assignedDriverId: rawDriverId,
     assignedDriverCode: driverCode,
-    assignedDriverName: r.driver?.user?.name || null,
-    assignedDriverPhone: r.driver?.user?.phone || null,
-    assignedVehicleId: r.vehicleId || r.driver?.assignedVehicleId || null,
+    assignedDriverName: hasActiveAssignment ? (r.driver?.user?.name || null) : null,
+    assignedDriverPhone: hasActiveAssignment ? (r.driver?.user?.phone || null) : null,
+    assignedVehicleId: hasActiveAssignment ? (r.vehicleId || r.driver?.assignedVehicleId || null) : null,
     assignedVehicleNumber,
     assignedVehicleModel,
     pickup: r.pickupAddress || r.pickupLocation,
@@ -749,11 +757,21 @@ export class AdminController {
         }
 
         const existingStops = (currentRide.stops && typeof currentRide.stops === 'object') ? (currentRide.stops as any) : {};
-        const updatedStops = {
+        const timeoutList = Array.isArray(existingStops.timeoutDriverIds)
+          ? existingStops.timeoutDriverIds.filter((id: string) => id !== finalDriverId)
+          : [];
+
+        const updatedStops: any = {
           ...existingStops,
+          timeoutDriverIds: timeoutList,
           assignedAt: new Date().toISOString(),
-          assignmentExpiresAt: new Date(Date.now() + 120000).toISOString(),
         };
+
+        if (!targetRide.isScheduled) {
+          updatedStops.assignmentExpiresAt = new Date(Date.now() + 120000).toISOString();
+        } else {
+          delete updatedStops.assignmentExpiresAt;
+        }
 
         return tx.ride.update({
           where: { id: ride.id },

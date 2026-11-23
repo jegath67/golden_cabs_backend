@@ -452,10 +452,12 @@ export class RidesService {
         throw new Error('Ride is no longer available');
       }
 
-      // Assignment Expiry Guard: 120 seconds limit from assignment
-      const assignedAtTime = meta.assignedAt ? new Date(meta.assignedAt).getTime() : (currentRide.updatedAt ? new Date(currentRide.updatedAt).getTime() : null);
-      if (assignedAtTime && (Date.now() - assignedAtTime > 120000)) {
-        throw new Error('Assignment expired: Driver offer has timed out (exceeded 120 seconds).');
+      // Assignment Expiry Guard: 120 seconds limit from assignment (immediate rides only)
+      if (!isScheduled) {
+        const assignedAtTime = meta.assignedAt ? new Date(meta.assignedAt).getTime() : (currentRide.updatedAt ? new Date(currentRide.updatedAt).getTime() : null);
+        if (assignedAtTime && (Date.now() - assignedAtTime > 120000)) {
+          throw new Error('Assignment expired: Driver offer has timed out (exceeded 120 seconds).');
+        }
       }
 
       return tx.ride.update({
@@ -1692,9 +1694,13 @@ export class RidesService {
             return false;
           }
         }
-        // Prevent the same timed-out driver from immediately receiving the same offer again
+        // Prevent the same timed-out driver from immediately receiving the same offer again,
+        // UNLESS they have been actively reassigned to it with a valid unexpired assignment window
         if (driverProfileId && Array.isArray(meta.timeoutDriverIds) && meta.timeoutDriverIds.includes(driverProfileId)) {
-          return false;
+          const isActivelyAssigned = r.driverId === driverProfileId && (!meta.assignmentExpiresAt || new Date(meta.assignmentExpiresAt).getTime() > Date.now());
+          if (!isActivelyAssigned) {
+            return false;
+          }
         }
       }
 
