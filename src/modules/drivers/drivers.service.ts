@@ -657,16 +657,24 @@ export class DriversService {
   }
 
   async getAllDrivers(filters?: {
-    approvalStatus?: 'PENDING' | 'APPROVED' | 'REJECTED';
+    approvalStatus?: 'PENDING' | 'APPROVED' | 'REJECTED' | string;
     shiftStatus?: 'ON_SHIFT' | 'OFF_SHIFT';
     personaType?: 'DRIVE_ONLY' | 'OWN_VEHICLE' | 'RENTAL' | 'VEHICLE_ONLY';
   }) {
     const personaFilter =
       filters?.personaType === 'VEHICLE_ONLY' ? 'RENTAL' : filters?.personaType;
 
+    let normalizedApproval: 'PENDING' | 'APPROVED' | 'REJECTED' | undefined;
+    if (filters?.approvalStatus) {
+      const upper = String(filters.approvalStatus).trim().toUpperCase();
+      if (upper === 'APPROVED' || upper === 'PENDING' || upper === 'REJECTED') {
+        normalizedApproval = upper as 'PENDING' | 'APPROVED' | 'REJECTED';
+      }
+    }
+
     const list = await prisma.driverProfile.findMany({
       where: {
-        ...(filters?.approvalStatus ? { approvalStatus: filters.approvalStatus } : {}),
+        ...(normalizedApproval ? { approvalStatus: normalizedApproval } : {}),
         ...(filters?.shiftStatus ? { shiftStatus: filters.shiftStatus } : {}),
         ...(personaFilter ? { personaType: personaFilter } : {}),
       },
