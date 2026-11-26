@@ -430,6 +430,16 @@ export class SocketService {
   }
 
   /**
+   * Broadcasts driver idle delay warning to the ride tracking room and admin fleet room.
+   */
+  broadcastDriverIdleAlert(rideId: string, payload: any) {
+    if (!this.io) return;
+    const cleanRideId = String(rideId).replace(/^#/, '').trim();
+    this.io.to(`ride_${cleanRideId}`).emit('driver_idle_warning', payload);
+    this.io.to('admin_live_fleet').emit('driver_idle_alert', payload);
+  }
+
+  /**
    * Returns the underlying SocketIOServer instance.
    */
   getIO(): SocketIOServer | null {

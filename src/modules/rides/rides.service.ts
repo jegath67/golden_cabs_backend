@@ -4,6 +4,7 @@ import { platformSettingsService } from '../settings/platform-settings.service';
 import { unavailabilityService } from '../unavailability/unavailability.service';
 import { locationCacheService } from '../drivers/location-cache.service';
 import { vehiclesService } from '../vehicles/vehicles.service';
+import { driverAvailabilityService } from './driver-availability.service';
 import { TripStatus } from '../../generated/prisma/client';
 import { socketService } from '../socket/socket.service';
 import { standardizeTripType } from '../../utils/trip-type.helper';
@@ -61,6 +62,15 @@ export function parseScheduledPickupTime(scheduledAtStr?: string | null): Date |
   // 2. If year was missing (V8 defaults to 2001) or parsing failed:
   // Remove weekday prefix if present (e.g., 'Mon, ', 'Tue, ')
   const cleaned = raw.replace(/^[A-Za-z]{3},\s*/, '');
+
+  // Reject strings that lack a recognizable month name or numeric date before appending currentYear
+  // (V8's Date("not-a-valid-date 2026") otherwise silently resolves to Jan 1, 2026)
+  const hasMonthOrDate =
+    /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b/i.test(cleaned) ||
+    /\d{1,4}[-/]\d{1,2}/.test(cleaned);
+  if (!hasMonthOrDate) {
+    return null;
+  }
 
   // Try appending current year: e.g. '27 Oct, 10:30 AM 2026'
   let withYear = new Date(`${cleaned} ${currentYear}`);
@@ -180,6 +190,7 @@ export class RidesService {
     stops?: any;
     riderName?: string;
     riderPhone?: string;
+    skipAvailabilityCheck?: boolean;
   }) {
     const clientDist = typeof data.distanceKm === 'number' && data.distanceKm > 0 ? Number(data.distanceKm.toFixed(1)) : undefined;
     const seatCapPre = data.seatCapacity || (data.requestedSeats?.includes('6') || data.requestedVehicle?.includes('6') ? 6 : 4);
@@ -282,6 +293,37 @@ export class RidesService {
     );
 
     const ride = await prisma.$transaction(async (tx) => {
+      // Atomic concurrency guard for immediate bookings:
+      // Acquire fixed two-integer PostgreSQL transaction-scoped advisory lock before
+      // evaluating category availability + open SEARCHING demand.
+      if (!isScheduledBooking && !data.skipAvailabilityCheck) {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(202611, 1)`;
+
+        const avail = await driverAvailabilityService.checkCategoryAvailability({
+          pickupLat: data.pickupLat,
+          pickupLng: data.pickupLng,
+          dropLat: data.dropLat,
+          dropLng: data.dropLng,
+          tripType: data.tripType,
+          customTripType: data.customTripType,
+          isScheduled: false,
+          scheduledAt: null,
+          tx,
+        });
+
+        const isRequestedAvailable = seatCap >= 6 ? avail.sixSeater.available : avail.fourSeater.available;
+        if (!isRequestedAvailable) {
+          const err: any = new Error(
+            seatCap >= 6
+              ? '6-Seater cabs are currently not available in your pickup area. Please choose another option or try again shortly.'
+              : '4-Seater cabs are currently not available in your pickup area. Please choose another option or try again shortly.'
+          );
+          err.statusCode = 409;
+          err.code = 'CATEGORY_UNAVAILABLE';
+          throw err;
+        }
+      }
+
       if (data.couponCode) {
         const { couponsService } = await import('../coupons/coupons.service');
         await couponsService.consumeCoupon(data.couponCode, tx);
@@ -460,12 +502,20 @@ export class RidesService {
         }
       }
 
+      const isAlreadyAccepted = currentRide.status === 'ACCEPTED' && currentRide.driverId === driver.id;
+      const initialAcceptedAt = isAlreadyAccepted && meta.acceptedAt ? meta.acceptedAt : new Date().toISOString();
+
       return tx.ride.update({
         where: { id: currentRide.id },
         data: {
           driverId: driver.id,
           vehicleId: driver.assignedVehicleId || currentRide.vehicleId,
           status: 'ACCEPTED',
+          stops: {
+            ...meta,
+            acceptedAt: initialAcceptedAt,
+            isDriverIdle: false,
+          },
         },
         include: {
           customer: { select: { id: true, name: true, phone: true } },
@@ -518,10 +568,12 @@ export class RidesService {
   async declineRide(driverUserId: string, rideId: string, reason?: string) {
     const driver = await prisma.driverProfile.findUnique({
       where: { userId: driverUserId },
+      include: { user: { select: { name: true, phone: true } } },
     });
     if (!driver) throw new Error('Driver profile not found');
 
-    const cleanRideId = String(rideId).trim();
+    const driverName = driver.user?.name || 'Driver';
+    const cleanRideId = String(rideId).trim().replace(/^#/, '');
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanRideId);
 
     const updatedRide = await prisma.$transaction(async (tx) => {
@@ -550,11 +602,23 @@ export class RidesService {
       if (!rejectedList.includes(driver.id)) {
         rejectedList.push(driver.id);
       }
+
+      const existingRejections = Array.isArray(meta.rejections) ? [...meta.rejections] : [];
+      existingRejections.push({
+        driverId: driver.id,
+        driverName,
+        reason: reason || 'Declined by driver',
+        declinedAt: new Date().toISOString(),
+      });
+
       const updatedMeta = {
         ...meta,
         rejectedDriverIds: rejectedList,
         declineReason: reason || 'Declined by driver',
+        declinedBy: driverName,
+        declinedDriverId: driver.id,
         declinedAt: new Date().toISOString(),
+        rejections: existingRejections,
       };
       delete (updatedMeta as any).assignedAt;
       delete (updatedMeta as any).assignmentExpiresAt;
@@ -576,6 +640,8 @@ export class RidesService {
 
     socketService.broadcastRideStatus(updatedRide.id, 'SEARCHING', {
       declinedDriverId: driver.id,
+      declinedDriverName: driverName,
+      declineReason: reason || 'Declined by driver',
       reason: reason || 'Declined by driver',
       unassigned: true,
     });
@@ -718,7 +784,7 @@ export class RidesService {
       throw new Error(`Invalid status: ${status}. Status update only permits EN_ROUTE, ARRIVED, or CANCELLED. Starting a ride requires customer OTP verification via /start.`);
     }
 
-    const cleanRideId = String(rideId).trim();
+    const cleanRideId = String(rideId).trim().replace(/^#/, '');
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanRideId);
     const ride = await prisma.ride.findFirst({
       where: {
@@ -822,7 +888,21 @@ export class RidesService {
         const alreadyRestored = metadata.couponRestored === true;
 
         // 4. Calculate authoritative cancellation policy and eligible refund
-        const quote = this.calculateCancellationPolicy(freshRide);
+        // Strictly scope zero customer fee and zero driver compensation to ADMIN cancellations
+        const isPrepaid = (freshRide.paymentStatus || '').toUpperCase() === 'PAID';
+        const totalFareAmount = Number(freshRide.finalFare || freshRide.estimatedFare || freshRide.fareBreakdown?.totalFare || 0);
+
+        const quote = actorRole === 'ADMIN'
+          ? {
+              isPaid: isPrepaid,
+              totalFare: totalFareAmount,
+              eligibleRefund: isPrepaid ? totalFareAmount : 0,
+              cancellationFee: 0,
+              refundPercentage: 100,
+              policyTier: 'ADMIN_CANCELLATION',
+              reason: 'Admin cancelled ride due to operational / driver delay. Customer cancellation fee is waived (0%) and 100% full advance refund is authorized.',
+            }
+          : this.calculateCancellationPolicy(freshRide);
 
         // 5. Restore coupon idempotently if applicable
         if (couponCode && !alreadyRestored) {
@@ -912,12 +992,16 @@ export class RidesService {
               data: {
                 rideId: freshRide.id,
                 customerId: freshRide.customerId,
-                reason: `[${quote.policyTier}] ${quote.reason} (Customer cancelled: ${resolvedReason})`,
+                reason: actorRole === 'ADMIN'
+                  ? `[ADMIN_CANCELLATION] Admin cancelled ride (${resolvedReason}). Full refund request created (pending gateway settlement).`
+                  : `[${quote.policyTier}] ${quote.reason} (Customer cancelled: ${resolvedReason})`,
                 amount: quote.eligibleRefund,
                 status: 'SUBMITTED',
-                adminRemarks: quote.cancellationFee > 0
-                  ? `Cancellation fee deducted: ₹${quote.cancellationFee} (Driver 70%: ₹${driverCompensation}, Platform 30%: ₹${platformShare}). Eligible Refund: ₹${quote.eligibleRefund} (${quote.refundPercentage}%).`
-                  : `100% full refund of ₹${quote.eligibleRefund} authorized per early cancellation policy.`,
+                adminRemarks: actorRole === 'ADMIN'
+                  ? `100% full refund of ₹${quote.eligibleRefund} authorized per Admin operational cancellation. Payment gateway processing pending settlement.`
+                  : (quote.cancellationFee > 0
+                      ? `Cancellation fee deducted: ₹${quote.cancellationFee} (Driver 70%: ₹${driverCompensation}, Platform 30%: ₹${platformShare}). Eligible Refund: ₹${quote.eligibleRefund} (${quote.refundPercentage}%).`
+                      : `100% full refund of ₹${quote.eligibleRefund} authorized per early cancellation policy.`),
               },
             });
           }
@@ -953,9 +1037,18 @@ export class RidesService {
         return cancelledRide;
       });
     } else {
+      const existingMeta = (ride.stops && typeof ride.stops === 'object') ? (ride.stops as any) : {};
       updated = await prisma.ride.update({
         where: { id: ride.id },
-        data: { status },
+        data: {
+          status,
+          stops: {
+            ...existingMeta,
+            isDriverIdle: false,
+            ...(status === 'EN_ROUTE' ? { enRouteAt: new Date().toISOString() } : {}),
+            ...(status === 'ARRIVED' ? { arrivedAt: new Date().toISOString() } : {}),
+          },
+        },
         include: {
           customer: true,
           driver: { include: { user: true } },
@@ -1000,15 +1093,36 @@ export class RidesService {
     } else if (status === 'CANCELLED') {
       // Invalidate active ride location cache immediately
       locationCacheService.invalidateRideValidation(ride.id).catch(() => {});
-      const recipientId = actorRole === 'DRIVER' ? ride.customerId : updated.driver?.userId;
-      if (recipientId) {
-        notificationsService.sendToUser({
-          userId: recipientId,
-          title: '❌ Ride Cancelled',
-          message: cancelReason ? `Reason: ${cancelReason}` : 'Ride has been cancelled.',
-          type: 'ride_cancelled',
-          data: { rideId },
-        }).catch((e) => console.error(e));
+      if (actorRole === 'ADMIN') {
+        if (updated.driver?.userId) {
+          notificationsService.sendToUser({
+            userId: updated.driver.userId,
+            title: '❌ Ride Cancelled by Admin',
+            message: cancelReason ? `Booking #${ride.bookingCode || ride.id.slice(-6)} cancelled: ${cancelReason}` : 'Ride has been cancelled by Admin.',
+            type: 'ride_cancelled',
+            data: { rideId },
+          }).catch((e) => console.error(e));
+        }
+        if (ride.customerId) {
+          notificationsService.sendToUser({
+            userId: ride.customerId,
+            title: '❌ Ride Cancelled',
+            message: cancelReason ? `Booking #${ride.bookingCode || ride.id.slice(-6)} cancelled: ${cancelReason}` : 'Your ride has been cancelled by Admin. Any prepaid amount will be refunded.',
+            type: 'ride_cancelled',
+            data: { rideId },
+          }).catch((e) => console.error(e));
+        }
+      } else {
+        const recipientId = actorRole === 'DRIVER' ? ride.customerId : updated.driver?.userId;
+        if (recipientId) {
+          notificationsService.sendToUser({
+            userId: recipientId,
+            title: '❌ Ride Cancelled',
+            message: cancelReason ? `Reason: ${cancelReason}` : 'Ride has been cancelled.',
+            type: 'ride_cancelled',
+            data: { rideId },
+          }).catch((e) => console.error(e));
+        }
       }
       // Also notify admins
       notificationsService.sendToAdmins({
@@ -1030,7 +1144,7 @@ export class RidesService {
       throw new Error('Start OTP is required');
     }
 
-    const cleanRideId = String(rideId).trim();
+    const cleanRideId = String(rideId).trim().replace(/^#/, '');
     const ride = await prisma.ride.findFirst({
       where: {
         OR: [
@@ -1094,6 +1208,7 @@ export class RidesService {
 
     socketService.broadcastRideStatus(updated.id, 'ONGOING', {
       startedAt: updated.startedAt,
+      driverId: updated.driverId,
     });
 
     notificationsService.sendToUser({
@@ -1121,7 +1236,7 @@ export class RidesService {
    */
   async completeRide(rideId: string, options?: { switchToCash?: boolean }) {
     const updatedRide = await prisma.$transaction(async (tx) => {
-      const cleanRideId = String(rideId).trim();
+      const cleanRideId = String(rideId).trim().replace(/^#/, '');
       const ride = await tx.ride.findFirst({
         where: {
           OR: [
@@ -1253,6 +1368,7 @@ export class RidesService {
     socketService.broadcastRideStatus(updatedRide.id, 'COMPLETED', {
       finalFare: updatedRide.finalFare,
       completedAt: updatedRide.completedAt,
+      driverId: updatedRide.driverId,
     });
 
     // Send notifications to Customer and Driver
@@ -1441,7 +1557,7 @@ export class RidesService {
   }
 
   async getRideById(rideId: string) {
-    const cleanRideId = String(rideId).trim();
+    const cleanRideId = String(rideId).trim().replace(/^#/, '');
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanRideId);
     const r = await prisma.ride.findFirst({
       where: {
@@ -1462,6 +1578,7 @@ export class RidesService {
         },
         vehicle: true,
         fareBreakdown: true,
+        review: true,
         paymentTransactions: {
           orderBy: { createdAt: 'desc' },
           take: 1,
@@ -1767,6 +1884,9 @@ export class RidesService {
         stops: meta.additionalStops || meta.stops || [],
         additionalStops: meta.additionalStops || [],
         createdAt: r.createdAt,
+        updatedAt: r.updatedAt ? r.updatedAt.toISOString() : (r.createdAt ? r.createdAt.toISOString() : null),
+        assignedAt: meta.assignedAt || null,
+        assignmentExpiresAt: meta.assignmentExpiresAt || null,
       };
     });
   }

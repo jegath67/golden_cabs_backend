@@ -505,7 +505,39 @@ export class DriversService {
       throw new Error('Driver profile not found');
     }
 
-    if (isOnline) {
+    let updatedProfile;
+
+    if (!isOnline) {
+      updatedProfile = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(202611, 1)`;
+
+        // Guard: Cannot go OFF_SHIFT while an active trip is in progress
+        const activeTrip = await tx.ride.findFirst({
+          where: {
+            driverId: driver.id,
+            status: { in: ['ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] },
+          },
+          select: { id: true, bookingCode: true, status: true },
+        });
+
+        if (activeTrip) {
+          throw new Error(
+            `Cannot go offline while an active trip (${activeTrip.bookingCode}) is in progress. Please complete the trip first.`
+          );
+        }
+
+        return tx.driverProfile.update({
+          where: { userId },
+          data: {
+            shiftStatus,
+            isOnline,
+          },
+          include: {
+            assignedVehicle: true,
+          },
+        });
+      });
+    } else {
       // 1. Guard: Check if Driver User account is Active
       const user = await prisma.user.findUnique({ where: { id: userId } });
       if (!user || user.isActive === false) {
@@ -560,18 +592,18 @@ export class DriversService {
           throw new Error(`Rental vehicle (${driver.assignedVehicle.model}) is ${driver.assignedVehicle.status.toLowerCase()} and cannot be used to start a shift. Please contact support.`);
         }
       }
-    }
 
-    const updatedProfile = await prisma.driverProfile.update({
-      where: { userId },
-      data: {
-        shiftStatus,
-        isOnline,
-      },
-      include: {
-        assignedVehicle: true,
-      },
-    });
+      updatedProfile = await prisma.driverProfile.update({
+        where: { userId },
+        data: {
+          shiftStatus,
+          isOnline,
+        },
+        include: {
+          assignedVehicle: true,
+        },
+      });
+    }
 
     if (!isOnline) {
       // Flush location to PostgreSQL immediately when going offline
@@ -721,6 +753,50 @@ export class DriversService {
       }
     } catch (_) {}
 
+    // Query active rides for all retrieved drivers to derive accurate real-time availability
+    const driverIds = list.map((d) => d.id);
+    const activeRides = driverIds.length > 0
+      ? await prisma.ride.findMany({
+          where: {
+            driverId: { in: driverIds },
+            status: { in: ['ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] },
+          },
+          select: {
+            id: true,
+            bookingCode: true,
+            driverId: true,
+            status: true,
+            stops: true,
+          },
+        })
+      : [];
+
+    const nowMs = Date.now();
+    const activeRideByDriverId: Record<string, any> = {};
+    for (const r of activeRides) {
+      if (!r.driverId) continue;
+      if (r.status === 'ONGOING' || r.status === 'EN_ROUTE' || r.status === 'ARRIVED') {
+        activeRideByDriverId[r.driverId] = r;
+      } else if (r.status === 'ACCEPTED') {
+        const meta = (r.stops as any) || {};
+        const isScheduled = !!meta.isScheduled && !!meta.scheduledAt;
+        if (isScheduled) {
+          const schedMs = new Date(meta.scheduledAt).getTime();
+          // Active now if pickup is within 30 minutes from now or overdue
+          if (!isNaN(schedMs) && schedMs <= nowMs + 30 * 60 * 1000) {
+            if (!activeRideByDriverId[r.driverId]) {
+              activeRideByDriverId[r.driverId] = r;
+            }
+          }
+        } else {
+          // Instant live accepted ride
+          if (!activeRideByDriverId[r.driverId]) {
+            activeRideByDriverId[r.driverId] = r;
+          }
+        }
+      }
+    }
+
     return list.map((d) => {
       const clean = d.id.replace(/-/g, '').toUpperCase();
       const suffix = clean.length >= 5 ? clean.substring(0, 5) : clean.padStart(4, '0');
@@ -728,9 +804,25 @@ export class DriversService {
       const vehicleDates = d.assignedVehicleId ? (unavailMap[d.assignedVehicleId] || []) : [];
       const unavailableDates = Array.from(new Set([...driverDates, ...vehicleDates])).sort();
 
+      const activeRide = activeRideByDriverId[d.id];
+      let availability = 'Offline';
+      if (activeRide) {
+        if (activeRide.status === 'ONGOING' || activeRide.status === 'EN_ROUTE' || activeRide.status === 'ARRIVED') {
+          availability = 'On Trip';
+        } else if (activeRide.status === 'ACCEPTED') {
+          availability = 'Assigned';
+        }
+      } else if (d.isOnline && d.shiftStatus !== 'OFF_SHIFT') {
+        availability = 'Online';
+      }
+
       return {
         ...d,
         driverCode: `DRV-${suffix}`,
+        availability,
+        activeRide: activeRide
+          ? { id: activeRide.id, bookingCode: activeRide.bookingCode, status: activeRide.status }
+          : null,
         unavailableDates,
         assignedVehicle: attachVehiclePhotos(d.assignedVehicle),
         ownedVehicles: Array.isArray(d.ownedVehicles)
@@ -787,16 +879,20 @@ export class DriversService {
         }).catch((err) => console.error('Error notifying driver of approval:', err));
       }
     } else if (approvalStatus === 'REJECTED') {
-      if (driver.userId) {
-        await prisma.user.update({
-          where: { id: driver.userId },
-          data: { isActive: false },
-        });
-      }
+      await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(202611, 1)`;
 
-      await prisma.driverProfile.update({
-        where: { id: driverProfileId },
-        data: { isOnline: false, shiftStatus: 'OFF_SHIFT' },
+        if (driver.userId) {
+          await tx.user.update({
+            where: { id: driver.userId },
+            data: { isActive: false },
+          });
+        }
+
+        await tx.driverProfile.update({
+          where: { id: driverProfileId },
+          data: { isOnline: false, shiftStatus: 'OFF_SHIFT' },
+        });
       });
 
       if (driver.userId) {
@@ -840,43 +936,50 @@ export class DriversService {
 
     const isActive = status === 'ACTIVE';
 
-    // 1. Update user account active state
-    if (driver.userId) {
-      await prisma.user.update({
-        where: { id: driver.userId },
-        data: { isActive },
-      });
-    }
-
-    // 2. If deactivated, handle active ride protection & force driver offline
+    // 1 & 2. Update user account active state + force driver offline atomically when deactivated
     let updatedProfile = driver;
     if (!isActive) {
-      // Fix 6: Check for ongoing active ride before deactivation
-      const activeRide = await prisma.ride.findFirst({
-        where: {
-          driverId: driverProfileId,
-          status: { in: ['SEARCHING', 'ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] },
-        },
+      const { activeRide, profile } = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(202611, 1)`;
+
+        if (driver.userId) {
+          await tx.user.update({
+            where: { id: driver.userId },
+            data: { isActive: false },
+          });
+        }
+
+        // Fix 6: Check for ongoing active ride before deactivation
+        const active = await tx.ride.findFirst({
+          where: {
+            driverId: driverProfileId,
+            status: { in: ['SEARCHING', 'ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] },
+          },
+        });
+
+        // Put driver OFF_SHIFT and offline so no NEW rides can be dispatched
+        // Active ongoing ride is NOT cancelled; driver can complete the trip safely.
+        const prof = await tx.driverProfile.update({
+          where: { id: driverProfileId },
+          data: {
+            isOnline: false,
+            shiftStatus: 'OFF_SHIFT',
+          },
+          include: { user: true, assignedVehicle: true },
+        });
+
+        // Also set assigned vehicle offline if any
+        if (driver.assignedVehicleId) {
+          await tx.vehicle.update({
+            where: { id: driver.assignedVehicleId },
+            data: { isOnline: false },
+          }).catch(() => {});
+        }
+
+        return { activeRide: active, profile: prof };
       });
 
-      // Put driver OFF_SHIFT and offline so no NEW rides can be dispatched
-      // Active ongoing ride is NOT cancelled; driver can complete the trip safely.
-      updatedProfile = await prisma.driverProfile.update({
-        where: { id: driverProfileId },
-        data: {
-          isOnline: false,
-          shiftStatus: 'OFF_SHIFT',
-        },
-        include: { user: true, assignedVehicle: true },
-      });
-
-      // Also set assigned vehicle offline if any
-      if (driver.assignedVehicleId) {
-        await prisma.vehicle.update({
-          where: { id: driver.assignedVehicleId },
-          data: { isOnline: false },
-        }).catch(() => {});
-      }
+      updatedProfile = profile;
 
       // Notify driver with active ride context
       if (driver.userId) {
@@ -890,6 +993,11 @@ export class DriversService {
           saveToDb: true,
         }).catch((err) => console.error('Error notifying driver of deactivation:', err));
       }
+    } else if (driver.userId) {
+      await prisma.user.update({
+        where: { id: driver.userId },
+        data: { isActive: true },
+      });
     }
 
     try {

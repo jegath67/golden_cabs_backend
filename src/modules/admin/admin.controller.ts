@@ -1,4 +1,5 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
+import { randomUUID } from 'crypto';
 import { prisma } from '../../config/prisma';
 import { standardizeTripType } from '../../utils/trip-type.helper';
 import { driverAvailabilityService } from '../rides/driver-availability.service';
@@ -152,6 +153,12 @@ function formatRideResponse(r: any) {
     scheduledAt: meta.scheduledAt ? String(meta.scheduledAt) : null,
     status: displayStatus,
     dbStatus: r.status,
+    isDriverIdle: !!meta.isDriverIdle,
+    acceptedAt: meta.acceptedAt || null,
+    driverIdleMinutes: meta.driverIdleMinutes || 0,
+    rating: r.review?.rating ?? null,
+    reviewComment: r.review?.comment ?? null,
+    reviewTags: Array.isArray(r.review?.tags) ? r.review.tags : [],
     isDriverAccepted: r.status === 'ACCEPTED' || ['EN_ROUTE', 'ARRIVED', 'ONGOING', 'COMPLETED'].includes(r.status),
     customerId: r.customer?.id || r.customerId,
     customerName: r.customer?.name || 'Customer',
@@ -190,6 +197,12 @@ function formatRideResponse(r: any) {
     cancelReason: r.cancelReason || null,
     cancelledBy: r.cancelledBy || null,
     cancelledAt: r.status === 'CANCELLED' ? (r.updatedAt ? r.updatedAt.toISOString() : null) : null,
+    declineReason: meta.declineReason || null,
+    declinedBy: meta.declinedBy || null,
+    declinedAt: meta.declinedAt || null,
+    declinedDriverId: meta.declinedDriverId || null,
+    rejectedDriverIds: Array.isArray(meta.rejectedDriverIds) ? meta.rejectedDriverIds : [],
+    rejections: Array.isArray(meta.rejections) ? meta.rejections : [],
     stops: Array.isArray(meta.additionalStops)
       ? meta.additionalStops
       : (Array.isArray(meta.stops) ? meta.stops : []),
@@ -198,6 +211,23 @@ function formatRideResponse(r: any) {
         time: formatISTTime(r.createdAt),
         event: 'Ride Created',
       },
+      ...(Array.isArray(meta.rejections)
+        ? meta.rejections.map((rej: any) => ({
+            time: rej.declinedAt ? formatISTTime(new Date(rej.declinedAt)) : '',
+            event: `${rej.driverName || 'Driver'} Rejected: ${rej.reason || 'No reason provided'}`,
+          }))
+        : (meta.declineReason
+            ? [{
+                time: meta.declinedAt ? formatISTTime(new Date(meta.declinedAt)) : '',
+                event: `${meta.declinedBy || 'Driver'} Rejected: ${meta.declineReason}`,
+              }]
+            : [])),
+      ...(r.status === 'CANCELLED'
+        ? [{
+            time: r.updatedAt ? formatISTTime(r.updatedAt) : '',
+            event: `Cancelled by ${r.cancelledBy || 'Customer'}${r.cancelReason ? ': ' + r.cancelReason : ''}`,
+          }]
+        : []),
     ],
   };
 }
@@ -468,6 +498,7 @@ export class AdminController {
           },
           vehicle: true,
           fareBreakdown: true,
+          review: true,
         },
       });
 
@@ -525,6 +556,7 @@ export class AdminController {
           },
           vehicle: true,
           fareBreakdown: true,
+          review: true,
         },
       });
 
@@ -565,6 +597,7 @@ export class AdminController {
           },
           vehicle: true,
           fareBreakdown: true,
+          review: true,
         },
       });
 
@@ -726,6 +759,8 @@ export class AdminController {
 
       // 4. Concurrency Protection: Re-evaluate and persist inside database transaction
       const updated = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(202611, 1)`;
+
         const currentRide = await tx.ride.findUnique({
           where: { id: ride.id },
           select: { id: true, status: true, driverId: true, paymentStatus: true, stops: true },
@@ -750,10 +785,28 @@ export class AdminController {
         // Concurrency re-check: verify driver has not been concurrently assigned to an overlapping trip
         const recheckAvailability = await driverAvailabilityService.evaluateDriverAvailability(
           finalDriverId,
-          targetRide
+          targetRide,
+          new Date(),
+          tx
         );
         if (!recheckAvailability.isAvailable) {
           throw new Error(`CONCURRENCY_CONFLICT: ${recheckAvailability.reasonMessage}`);
+        }
+
+        // Rule 5: If a specific vehicleId was passed, enforce strict 4/6-Seater category matching on that vehicle too
+        if (vehicleId && vehicleId !== recheckAvailability.vehicle?.id) {
+          const explicitVehicle = await tx.vehicle.findUnique({ where: { id: String(vehicleId) } });
+          if (!explicitVehicle || explicitVehicle.status !== 'VERIFIED') {
+            throw new Error('CONCURRENCY_CONFLICT: Specified vehicle is not found or not verified.');
+          }
+          if (targetRide.seatCapacity) {
+            if (targetRide.seatCapacity >= 6 && explicitVehicle.seatCapacity < 6) {
+              throw new Error(`CONCURRENCY_CONFLICT: Ride requires 6-Seater vehicle, but specified vehicle only has ${explicitVehicle.seatCapacity} seats.`);
+            }
+            if (targetRide.seatCapacity <= 4 && explicitVehicle.seatCapacity >= 6) {
+              throw new Error(`CONCURRENCY_CONFLICT: 4-Seater ride cannot be assigned a 6-Seater vehicle (${explicitVehicle.seatCapacity} seats).`);
+            }
+          }
         }
 
         const existingStops = (currentRide.stops && typeof currentRide.stops === 'object') ? (currentRide.stops as any) : {};
@@ -761,11 +814,25 @@ export class AdminController {
           ? existingStops.timeoutDriverIds.filter((id: string) => id !== finalDriverId)
           : [];
 
+        const isNewDriverAssignment = currentRide.driverId !== finalDriverId;
         const updatedStops: any = {
           ...existingStops,
           timeoutDriverIds: timeoutList,
           assignedAt: new Date().toISOString(),
+          assignmentId: isNewDriverAssignment ? randomUUID() : (existingStops.assignmentId || randomUUID()),
         };
+
+        if (isNewDriverAssignment) {
+          delete updatedStops.acceptedAt;
+          delete updatedStops.driverIdleAlertSentAt;
+          delete updatedStops.isDriverIdle;
+          delete updatedStops.driverIdleMinutes;
+          delete updatedStops.idleAlertState;
+          delete updatedStops.idleAlertDispatchedAt;
+          delete updatedStops.idleAlertAttempts;
+          delete updatedStops.idleAlertLastAttemptAt;
+          delete updatedStops.idleAlertLastError;
+        }
 
         if (!targetRide.isScheduled) {
           updatedStops.assignmentExpiresAt = new Date(Date.now() + 120000).toISOString();
@@ -854,6 +921,7 @@ export class AdminController {
               pickupLng: String(updated.pickupLng ?? 79.8174),
               dropLat: String(updated.dropLat ?? 11.9680),
               dropLng: String(updated.dropLng ?? 79.8105),
+              assignedAt: (updated.stops as any)?.assignedAt || null,
             },
           });
         }
@@ -968,6 +1036,34 @@ export class AdminController {
       return reply.status(500).send({
         success: false,
         message: error.message || 'Failed to unassign ride',
+      });
+    }
+  }
+
+  /**
+   * Admin cancels a ride (e.g. driver idle > 5 mins, customer request, or emergency)
+   */
+  async cancelRide(req: FastifyRequest, reply: FastifyReply) {
+    try {
+      const { id } = req.params as { id: string };
+      const { reason } = (req.body as { reason?: string } | null | undefined) || {};
+      const { ridesService } = await import('../rides/rides.service');
+      const updated = await ridesService.updateStatus(
+        id,
+        'CANCELLED',
+        'ADMIN',
+        reason || 'Cancelled by Admin due to driver inactivity',
+        (req as any).user?.id
+      );
+      return reply.send({
+        success: true,
+        message: 'Ride cancelled successfully by Admin',
+        data: formatRideResponse(updated),
+      });
+    } catch (error: any) {
+      return reply.status(400).send({
+        success: false,
+        message: error.message || 'Failed to cancel ride',
       });
     }
   }
@@ -1945,9 +2041,10 @@ export class AdminController {
         const meta = (r.stops as any) || {};
         const fare = r.finalFare || r.fareBreakdown?.totalFare || r.estimatedFare || 0;
         const cachedDriverLoc = r.driverId ? cachedLocations.get(r.driverId) : undefined;
+        const cleanBookingId = r.bookingCode || (r.id ? (String(r.id).startsWith('GC-') ? String(r.id) : `GC-${String(r.id).replace(/-/g, '').substring(0, 6).toUpperCase()}`) : 'GC-000000');
         return {
           id: r.id,
-          bookingId: r.bookingCode || r.id,
+          bookingId: cleanBookingId,
           customerName: r.customer?.name || 'Customer',
           customerPhone: r.customer?.phone || '',
           driverName: r.driver?.user?.name || 'Unassigned',

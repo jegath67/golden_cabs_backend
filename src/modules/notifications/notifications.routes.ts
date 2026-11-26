@@ -3,6 +3,16 @@ import { notificationsController } from './notifications.controller';
 import { authenticate, requireRoles } from '../../middlewares/auth.middleware';
 
 export async function notificationsRoutes(app: FastifyInstance) {
+  // Gracefully handle empty JSON body on notification routes (e.g. PATCH /:id/read)
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+    try {
+      const trimmed = typeof body === 'string' ? body.trim() : '';
+      done(null, trimmed ? JSON.parse(trimmed) : {});
+    } catch (err: any) {
+      done(err, undefined);
+    }
+  });
+
   // Device Token routes (Guarded by JWT authentication)
   app.post(
     '/device-token',

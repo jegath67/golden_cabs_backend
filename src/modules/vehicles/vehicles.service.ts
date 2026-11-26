@@ -187,15 +187,48 @@ export class VehiclesService {
   }
 
   async updateVehicleStatus(id: string, status: 'PENDING' | 'VERIFIED' | 'REJECTED' | 'MAINTENANCE', rejectionReason?: string) {
-    const updated = await prisma.vehicle.update({
-      where: { id },
-      data: {
-        status,
-        ...(status === 'MAINTENANCE' || status === 'REJECTED' ? { isOnline: false } : {}),
-      },
-      include: {
-        owner: { select: { userId: true } },
-      },
+    const isDeactivation = status === 'MAINTENANCE' || status === 'REJECTED';
+
+    const { updated, deactivatedDriverInfo } = await prisma.$transaction(async (tx) => {
+      if (isDeactivation) {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(202611, 1)`;
+      }
+
+      const upd = await tx.vehicle.update({
+        where: { id },
+        data: {
+          status,
+          ...(isDeactivation ? { isOnline: false } : {}),
+        },
+        include: {
+          owner: { select: { userId: true } },
+          assignedDriver: true,
+        },
+      });
+
+      let driverInfo: { userId: string | null; activeRideBookingCode?: string | null } | null = null;
+      if (isDeactivation && upd.assignedDriver) {
+        const driverProfile = upd.assignedDriver;
+        const activeRide = await tx.ride.findFirst({
+          where: {
+            driverId: driverProfile.id,
+            status: { in: ['SEARCHING', 'ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] },
+          },
+          select: { bookingCode: true },
+        });
+
+        await tx.driverProfile.update({
+          where: { id: driverProfile.id },
+          data: { isOnline: false, shiftStatus: 'OFF_SHIFT' },
+        });
+
+        driverInfo = {
+          userId: driverProfile.userId,
+          activeRideBookingCode: activeRide?.bookingCode || null,
+        };
+      }
+
+      return { updated: upd, deactivatedDriverInfo: driverInfo };
     });
 
     if (updated.owner?.userId) {
@@ -222,45 +255,17 @@ export class VehiclesService {
       }
     }
 
-    // Vehicle Deactivation -> Force assigned driver offline
-    if (status === 'MAINTENANCE' || status === 'REJECTED') {
-      const vehicleWithDriver = await prisma.vehicle.findUnique({
-        where: { id },
-        include: {
-          assignedDriver: true,
-        },
-      });
-
-      if (vehicleWithDriver?.assignedDriver) {
-        const driverProfile = vehicleWithDriver.assignedDriver;
-
-        // Check for active ride — ride continues safely, driver just can't go online again
-        const activeRide = await prisma.ride.findFirst({
-          where: {
-            driverId: driverProfile.id,
-            status: { in: ['SEARCHING', 'ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] },
-          },
-        });
-
-        // Force driver offline (OFF_SHIFT) so no new rides are dispatched to them
-        await prisma.driverProfile.update({
-          where: { id: driverProfile.id },
-          data: { isOnline: false, shiftStatus: 'OFF_SHIFT' },
-        });
-
-        // Notify driver
-        if (driverProfile.userId) {
-          await notificationsService.sendToUser({
-            userId: driverProfile.userId,
-            title: '⚠️ Vehicle Deactivated',
-            message: activeRide
-              ? `Your vehicle (${updated.brand} ${updated.model}) has been deactivated by Admin. Safely complete your current trip (${activeRide.bookingCode}) then contact support.`
-              : `Your vehicle (${updated.brand} ${updated.model}) has been deactivated by Admin. You have been taken offline. Please contact support.`,
-            type: 'vehicle_deactivated',
-            saveToDb: true,
-          }).catch((err) => console.error('Error notifying driver of vehicle deactivation:', err));
-        }
-      }
+    // Notify deactivated assigned driver
+    if (deactivatedDriverInfo?.userId) {
+      await notificationsService.sendToUser({
+        userId: deactivatedDriverInfo.userId,
+        title: '⚠️ Vehicle Deactivated',
+        message: deactivatedDriverInfo.activeRideBookingCode
+          ? `Your vehicle (${updated.brand} ${updated.model}) has been deactivated by Admin. Safely complete your current trip (${deactivatedDriverInfo.activeRideBookingCode}) then contact support.`
+          : `Your vehicle (${updated.brand} ${updated.model}) has been deactivated by Admin. You have been taken offline. Please contact support.`,
+        type: 'vehicle_deactivated',
+        saveToDb: true,
+      }).catch((err) => console.error('Error notifying driver of vehicle deactivation:', err));
     }
 
     return updated;
@@ -307,28 +312,36 @@ export class VehiclesService {
   async assignVehicleToDriver(vehicleId: string, driverProfileId: string | null) {
     if (!driverProfileId) {
       // Unassign driver from vehicle
-      const existingVehicle = await prisma.vehicle.findUnique({
-        where: { id: vehicleId },
-        include: {
-          assignedDriver: {
-            include: { user: true },
-          },
-        },
-      });
+      const existingVehicle = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(202611, 1)`;
 
-      if (existingVehicle?.assignedDriver) {
-        // Automatically put driver off shift when vehicle is unassigned
-        await prisma.driverProfile.update({
-          where: { id: existingVehicle.assignedDriver.id },
-          data: {
-            assignedVehicleId: null,
-            vehicleAssignedAt: null,
-            vehicleExpiresAt: null,
-            isOnline: false,
-            shiftStatus: 'OFF_SHIFT',
+        const found = await tx.vehicle.findUnique({
+          where: { id: vehicleId },
+          include: {
+            assignedDriver: {
+              include: { user: true },
+            },
           },
         });
 
+        if (found?.assignedDriver) {
+          // Automatically put driver off shift when vehicle is unassigned
+          await tx.driverProfile.update({
+            where: { id: found.assignedDriver.id },
+            data: {
+              assignedVehicleId: null,
+              vehicleAssignedAt: null,
+              vehicleExpiresAt: null,
+              isOnline: false,
+              shiftStatus: 'OFF_SHIFT',
+            },
+          });
+        }
+
+        return found;
+      });
+
+      if (existingVehicle?.assignedDriver) {
         // Send notification to the driver
         if (existingVehicle.assignedDriver.userId) {
           await notificationsService.sendToUser({
@@ -380,50 +393,56 @@ export class VehiclesService {
       });
     }
 
-    // 2b. If this vehicle was previously assigned to another driver, unassign that driver first
-    await prisma.driverProfile.updateMany({
-      where: { assignedVehicleId: vehicleId, id: { not: driverProfileId } },
-      data: {
-        assignedVehicleId: null,
-        vehicleAssignedAt: null,
-        vehicleExpiresAt: null,
-      },
-    });
-
     const isDriveOnly = driver.personaType === 'DRIVE_ONLY';
     const assignedAt = new Date();
     const expiresAt = isDriveOnly ? calculateISTEndOfDay(assignedAt) : null;
 
-    // Connect this vehicle to the driver and record assignment timestamps.
-    // Critical Guard: Reset isOnline to false & shiftStatus to OFF_SHIFT so the driver
-    // cannot be matched or show as Available until they explicitly go online in the app.
-    await prisma.driverProfile.update({
-      where: { id: driverProfileId },
-      data: {
-        assignedVehicleId: vehicleId,
-        vehicleAssignedAt: isDriveOnly ? assignedAt : null,
-        vehicleExpiresAt: expiresAt,
-        isOnline: false,
-        shiftStatus: 'OFF_SHIFT',
-      },
-    });
+    const updated = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(202611, 1)`;
 
-    // 3. Connect this vehicle to the driver
-    const updated = await prisma.vehicle.update({
-      where: { id: vehicleId },
-      data: {
-        isOnline: false,
-        assignedDriver: {
-          connect: { id: driverProfileId },
+      // 2b. If this vehicle was previously assigned to another driver, unassign that driver first
+      await tx.driverProfile.updateMany({
+        where: { assignedVehicleId: vehicleId, id: { not: driverProfileId } },
+        data: {
+          assignedVehicleId: null,
+          vehicleAssignedAt: null,
+          vehicleExpiresAt: null,
+          isOnline: false,
+          shiftStatus: 'OFF_SHIFT',
         },
-      },
-      include: {
-        assignedDriver: {
-          include: {
-            user: { select: { id: true, name: true, phone: true } },
+      });
+
+      // Connect this vehicle to the driver and record assignment timestamps.
+      // Critical Guard: Reset isOnline to false & shiftStatus to OFF_SHIFT so the driver
+      // cannot be matched or show as Available until they explicitly go online in the app.
+      await tx.driverProfile.update({
+        where: { id: driverProfileId },
+        data: {
+          assignedVehicleId: vehicleId,
+          vehicleAssignedAt: isDriveOnly ? assignedAt : null,
+          vehicleExpiresAt: expiresAt,
+          isOnline: false,
+          shiftStatus: 'OFF_SHIFT',
+        },
+      });
+
+      // 3. Connect this vehicle to the driver
+      return tx.vehicle.update({
+        where: { id: vehicleId },
+        data: {
+          isOnline: false,
+          assignedDriver: {
+            connect: { id: driverProfileId },
           },
         },
-      },
+        include: {
+          assignedDriver: {
+            include: {
+              user: { select: { id: true, name: true, phone: true } },
+            },
+          },
+        },
+      });
     });
 
     // 4. Mark any pending VehicleRequest for this driver as ASSIGNED
@@ -549,9 +568,10 @@ export class VehiclesService {
     const vehicleId = driver.assignedVehicleId;
     const vehicle = driver.assignedVehicle;
 
-    // Disconnect vehicle and set driver OFF_SHIFT & offline
-    await prisma.$transaction([
-      prisma.driverProfile.update({
+    // Disconnect vehicle and set driver OFF_SHIFT & offline atomically under booking lock
+    await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(202611, 1)`;
+      await tx.driverProfile.update({
         where: { id: driver.id },
         data: {
           assignedVehicleId: null,
@@ -560,19 +580,17 @@ export class VehiclesService {
           isOnline: false,
           shiftStatus: 'OFF_SHIFT',
         },
-      }),
-      ...(vehicleId
-        ? [
-            prisma.vehicle.update({
-              where: { id: vehicleId },
-              data: {
-                isOnline: false,
-                assignedDriver: { disconnect: true },
-              },
-            }),
-          ]
-        : []),
-    ]);
+      });
+      if (vehicleId) {
+        await tx.vehicle.update({
+          where: { id: vehicleId },
+          data: {
+            isOnline: false,
+            assignedDriver: { disconnect: true },
+          },
+        });
+      }
+    });
 
     console.log(
       `[VehicleExpiry] Auto-expired vehicle ${vehicle?.vehicleNumber || vehicleId} for DRIVE_ONLY driver ${driver.user?.name || driver.id} (Trigger: ${options?.reason || 'auto_check'})`
@@ -663,9 +681,10 @@ export class VehiclesService {
       }
 
       try {
-        // Disconnect vehicle and set driver OFF_SHIFT & offline
-        await prisma.$transaction([
-          prisma.driverProfile.update({
+        // Disconnect vehicle and set driver OFF_SHIFT & offline atomically under booking lock
+        await prisma.$transaction(async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(202611, 1)`;
+          await tx.driverProfile.update({
             where: { id: driver.id },
             data: {
               assignedVehicleId: null,
@@ -674,8 +693,8 @@ export class VehiclesService {
               isOnline: false,
               shiftStatus: 'OFF_SHIFT',
             },
-          }),
-          prisma.vehicle.update({
+          });
+          await tx.vehicle.update({
             where: { id: vehicle.id },
             data: {
               isOnline: false,
@@ -683,8 +702,8 @@ export class VehiclesService {
                 disconnect: true,
               },
             },
-          }),
-        ]);
+          });
+        });
 
         resetCount++;
         details.push({

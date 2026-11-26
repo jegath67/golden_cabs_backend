@@ -6,6 +6,10 @@ export async function ridesRoutes(app: FastifyInstance) {
   // Public fare estimate
   app.post('/estimate', ridesController.estimateFare.bind(ridesController));
 
+  // Live category availability check (4-Seater / 6-Seater)
+  app.get('/check-availability', ridesController.checkAvailability.bind(ridesController));
+  app.post('/check-availability', ridesController.checkAvailability.bind(ridesController));
+
   // Customer creates a ride request
   app.post(
     '/request',

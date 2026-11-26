@@ -60,8 +60,28 @@ async function run() {
     const drvUser = await prisma.user.create({
       data: { phone: `9802${stamp.slice(-6)}`, name: 'QA Driver', role: 'DRIVER' },
     });
+    const drvVeh = await prisma.vehicle.create({
+      data: {
+        vehicleNumber: `TN-QA-${stamp.slice(-4)}`,
+        brand: 'Maruti',
+        model: 'Dzire',
+        year: 2023,
+        category: 'BUDGET',
+        seatCapacity: 4,
+        status: 'VERIFIED',
+      },
+    });
     const drv = await prisma.driverProfile.create({
-      data: { userId: drvUser.id, personaType: 'OWN_VEHICLE', approvalStatus: 'APPROVED' },
+      data: {
+        userId: drvUser.id,
+        personaType: 'OWN_VEHICLE',
+        approvalStatus: 'APPROVED',
+        isOnline: true,
+        shiftStatus: 'ON_SHIFT',
+        currentLatitude: 11.93,
+        currentLongitude: 79.83,
+        assignedVehicleId: drvVeh.id,
+      },
     });
     custAId = custA.id;
     custBId = custB.id;
@@ -96,6 +116,7 @@ async function run() {
       carName: 'Sedan',
       paymentMethod: 'UPI',
       zone: testZone,
+      skipAvailabilityCheck: true,
     });
     createdRideIds.push(ride1.id);
     const fare1 = ride1.estimatedFare;
@@ -314,6 +335,7 @@ async function run() {
       carName: 'Sedan',
       paymentMethod: 'UPI',
       zone: testZone,
+      skipAvailabilityCheck: true,
     });
     createdRideIds.push(ride2.id);
     await prisma.ride.update({ where: { id: ride2.id }, data: { driverId: drv.id, status: 'ONGOING' } });
@@ -387,6 +409,7 @@ async function run() {
       carName: 'Sedan',
       paymentMethod: 'UPI',
       zone: testZone,
+      skipAvailabilityCheck: true,
     });
     createdRideIds.push(ride3.id);
     const order3 = await paymentsService.createRazorpayOrder({ customerId: custA.id, rideIdentifier: ride3.id });
@@ -432,6 +455,7 @@ async function run() {
       carName: 'Sedan',
       paymentMethod: 'CASH',
       zone: testZone,
+      skipAvailabilityCheck: true,
     });
     createdRideIds.push(cashRide.id);
     await prisma.ride.update({ where: { id: cashRide.id }, data: { driverId: drv.id, status: 'ONGOING' } });
@@ -465,6 +489,7 @@ async function run() {
       carName: 'Sedan',
       paymentMethod: 'UPI',
       zone: testZone,
+      skipAvailabilityCheck: true,
     });
     createdRideIds.push(ride4.id);
     await prisma.ride.update({ where: { id: ride4.id }, data: { driverId: drv.id, status: 'ONGOING' } });
@@ -524,6 +549,7 @@ async function run() {
     });
     if (slabId) await prisma.pricingSlab.deleteMany({ where: { id: slabId } });
     if (drvProfileId) await prisma.driverProfile.deleteMany({ where: { id: drvProfileId } });
+    await prisma.vehicle.deleteMany({ where: { vehicleNumber: { contains: stamp.slice(-4) } } });
     if (drvUserId) await prisma.user.deleteMany({ where: { id: drvUserId } });
     if (custAId) await prisma.user.deleteMany({ where: { id: custAId } });
     if (custBId) await prisma.user.deleteMany({ where: { id: custBId } });

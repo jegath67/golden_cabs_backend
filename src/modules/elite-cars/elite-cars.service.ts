@@ -413,6 +413,7 @@ export class EliteCarsService {
 
     await prisma.$transaction(async (tx) => {
       if (existing.assignedDriver?.id) {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(202611, 1)`;
         await tx.driverProfile.update({
           where: { id: existing.assignedDriver.id },
           data: { assignedVehicleId: null, isOnline: false, shiftStatus: 'OFF_SHIFT' },

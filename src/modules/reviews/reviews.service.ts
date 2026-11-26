@@ -198,15 +198,19 @@ export class ReviewsService {
         ? r.createdAt.toISOString().replace('T', ' ').substring(0, 16)
         : '';
 
+      const cleanRideId = r.ride?.bookingCode || (r.rideId ? (r.rideId.startsWith('GC-') ? r.rideId : `GC-${r.rideId.replace(/-/g, '').substring(0, 6).toUpperCase()}`) : 'GC-000000');
+      const cleanCustomerId = r.customerId ? (r.customerId.startsWith('CUST-') ? r.customerId : `CUST-${r.customerId.replace(/-/g, '').slice(-5).toUpperCase()}`) : 'CUST-00000';
+      const cleanDriverId = r.driver?.assignedVehicle?.vehicleNumber || (r.driverId ? (r.driverId.startsWith('DRV-') ? r.driverId : `DRV-${r.driverId.replace(/-/g, '').substring(0, 5).toUpperCase()}`) : 'Not Assigned');
+
       return {
         id: r.id,
-        tripId: r.ride?.bookingCode || r.rideId,
+        tripId: cleanRideId,
         customerName: r.customer?.name || 'Customer',
-        customerId: r.customerId,
+        customerId: cleanCustomerId,
         customerPhone: r.customer?.phone || '',
         customerAvatar: (r.customer?.name || 'C').substring(0, 1).toUpperCase(),
         driverName: r.driver?.user?.name || 'Driver',
-        driverId: r.driver?.assignedVehicle?.vehicleNumber || r.driverId,
+        driverId: cleanDriverId,
         driverAvatar: (r.driver?.user?.name || 'D').substring(0, 1).toUpperCase(),
         rating: r.rating,
         reviewText: r.comment || (r.tags && r.tags.length > 0 ? r.tags.join(', ') : 'No written feedback'),

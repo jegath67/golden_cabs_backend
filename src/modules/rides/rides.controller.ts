@@ -1,8 +1,75 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import { ridesService, type EstimateFareInput } from './rides.service';
+import { ridesService, parseScheduledPickupTime, type EstimateFareInput } from './rides.service';
+import { driverAvailabilityService } from './driver-availability.service';
 import { prisma } from '../../config/prisma';
 
 export class RidesController {
+  async checkAvailability(req: FastifyRequest<any>, reply: FastifyReply) {
+    const query = (req.query as any) || {};
+    const body = (req.body as any) || {};
+
+    const pickupLat = Number(query.pickupLat ?? body.pickupLat);
+    const pickupLng = Number(query.pickupLng ?? body.pickupLng);
+    const dropLatRaw = query.dropLat ?? body.dropLat;
+    const dropLngRaw = query.dropLng ?? body.dropLng;
+    const tripType = query.tripType ?? body.tripType;
+    const customTripType = query.customTripType ?? body.customTripType;
+    const scheduledAtRaw = query.scheduledAt ?? body.scheduledAt;
+
+    if (isNaN(pickupLat) || isNaN(pickupLng)) {
+      return reply.status(400).send({
+        success: false,
+        message: 'Valid pickupLat and pickupLng are required',
+      });
+    }
+
+    const dropLat = dropLatRaw !== undefined && !isNaN(Number(dropLatRaw)) ? Number(dropLatRaw) : undefined;
+    const dropLng = dropLngRaw !== undefined && !isNaN(Number(dropLngRaw)) ? Number(dropLngRaw) : undefined;
+
+    let scheduledAt: Date | null = null;
+    let isScheduled = false;
+    if (
+      scheduledAtRaw !== undefined &&
+      scheduledAtRaw !== null &&
+      String(scheduledAtRaw).trim().length > 0 &&
+      String(scheduledAtRaw).trim() !== 'Pick-up now'
+    ) {
+      const parsed = parseScheduledPickupTime(String(scheduledAtRaw).trim());
+      if (!parsed || isNaN(parsed.getTime())) {
+        return reply.status(400).send({
+          success: false,
+          message: `Invalid scheduled pickup time format: "${scheduledAtRaw}".`,
+        });
+      }
+      scheduledAt = parsed;
+      isScheduled = true;
+    }
+
+    try {
+      const availability = await driverAvailabilityService.checkCategoryAvailability({
+        pickupLat,
+        pickupLng,
+        dropLat,
+        dropLng,
+        tripType,
+        customTripType,
+        isScheduled,
+        scheduledAt,
+      });
+
+      return reply.send({
+        success: true,
+        data: availability,
+      });
+    } catch (error: any) {
+      return reply.status(500).send({
+        success: false,
+        message: 'Failed to check driver availability',
+        error: String(error?.message || error),
+      });
+    }
+  }
+
   async estimateFare(req: FastifyRequest<any>, reply: FastifyReply) {
     const { pickupLat, pickupLng, dropLat, dropLng } = (req.body as EstimateFareInput) || {};
     if (pickupLat === undefined || pickupLng === undefined || dropLat === undefined || dropLng === undefined) {
@@ -32,11 +99,53 @@ export class RidesController {
       });
     }
 
+    // Explicit allowlist of public customer booking fields — never forward internal service flags
+    // such as skipAvailabilityCheck from HTTP request bodies.
+    const sanitizedPayload = {
+      pickupLocation: body.pickupLocation,
+      pickupAddress: body.pickupAddress,
+      pickupLat: body.pickupLat,
+      pickupLng: body.pickupLng,
+      dropLocation: body.dropLocation,
+      dropAddress: body.dropAddress,
+      dropLat: body.dropLat,
+      dropLng: body.dropLng,
+      distanceKm: body.distanceKm,
+      tripType: body.tripType,
+      customTripType: body.customTripType,
+      isElite: body.isElite,
+      category: body.category,
+      paymentMethod: body.paymentMethod,
+      couponCode: body.couponCode,
+      scheduledAt: body.scheduledAt,
+      requestedSeats: body.requestedSeats,
+      seatCapacity: body.seatCapacity,
+      requestedVehicle: body.requestedVehicle,
+      vehicleType: body.vehicleType,
+      zone: body.zone,
+      carName: body.carName,
+      tollCharge: body.tollCharge,
+      additionalStops: body.additionalStops,
+      stops: Array.isArray(body.stops)
+        ? body.stops
+        : body.stops && Array.isArray(body.stops.additionalStops)
+          ? body.stops.additionalStops
+          : undefined,
+      riderName: body.riderName,
+      riderPhone: body.riderPhone,
+      skipAvailabilityCheck: false,
+    };
+
     try {
-      const ride = await ridesService.requestRide(user.id, body);
+      const ride = await ridesService.requestRide(user.id, sanitizedPayload);
       return reply.send({ success: true, message: 'Ride requested successfully', data: ride });
     } catch (error: any) {
-      return reply.status(400).send({ success: false, message: error.message || 'Failed to request ride' });
+      const statusCode = error.statusCode || 400;
+      return reply.status(statusCode).send({
+        success: false,
+        code: error.code || 'BAD_REQUEST',
+        message: error.message || 'Failed to request ride',
+      });
     }
   }
 

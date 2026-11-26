@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { vehiclesService } from '../vehicles/vehicles.service';
 import { prisma } from '../../config/prisma';
 import { notificationsService } from '../notifications/notifications.service';
@@ -24,6 +25,8 @@ class SchedulerService {
   private isProcessing = false;
   private isCheckingExpiredRides = false;
   private isCheckingExpiredAssignments = false;
+  private isCheckingDriverIdleDelays = false;
+  private isCheckingUnassignedSearching = false;
 
   /**
    * Initialize the scheduler at server boot
@@ -45,12 +48,16 @@ class SchedulerService {
       this.checkAndRunMidnightReset();
       this.checkAndExpireUnassignedScheduledRides();
       this.checkAndExpireDriverAssignments();
+      this.checkDriverIdleDelays();
+      this.checkUnassignedSearchingDelays();
     }, 30 * 1000);
 
     // Initial check in case server started precisely at 00:00 or pending expired rides exist
     this.checkAndRunMidnightReset();
     this.checkAndExpireUnassignedScheduledRides();
     this.checkAndExpireDriverAssignments();
+    this.checkDriverIdleDelays();
+    this.checkUnassignedSearchingDelays();
   }
 
   stop() {
@@ -348,6 +355,8 @@ class SchedulerService {
 
         // Atomic transaction with race protection
         const releaseSucceeded = await prisma.$transaction(async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(202611, 1)`;
+
           const freshRide = await tx.ride.findUnique({
             where: { id: ride.id },
             select: { id: true, status: true, driverId: true, stops: true },
@@ -445,19 +454,41 @@ class SchedulerService {
                 const assignedNow = new Date();
                 const assignedExpires = new Date(assignedNow.getTime() + 120000);
 
-                const assignedStops = {
+                const assignedStops: any = {
                   ...latestMeta,
+                  assignmentId: randomUUID(),
                   assignedAt: assignedNow.toISOString(),
                   assignmentExpiresAt: assignedExpires.toISOString(),
                 };
+                delete assignedStops.acceptedAt;
+                delete assignedStops.driverIdleAlertSentAt;
+                delete assignedStops.isDriverIdle;
+                delete assignedStops.driverIdleMinutes;
+                delete assignedStops.idleAlertState;
+                delete assignedStops.idleAlertDispatchedAt;
+                delete assignedStops.idleAlertAttempts;
+                delete assignedStops.idleAlertLastAttemptAt;
+                delete assignedStops.idleAlertLastError;
 
-                // Atomic conditional assignment
+                // Atomic conditional assignment serialized with booking advisory lock
                 const redispatchSucceeded = await prisma.$transaction(async (tx) => {
+                  await tx.$executeRaw`SELECT pg_advisory_xact_lock(202611, 1)`;
+
                   const checkRide = await tx.ride.findUnique({
                     where: { id: ride.id },
                     select: { status: true, driverId: true },
                   });
                   if (!checkRide || checkRide.status !== TripStatus.SEARCHING || checkRide.driverId !== null) {
+                    return false;
+                  }
+
+                  const recheckDriver = await driverAvailabilityService.evaluateDriverAvailability(
+                    nextDriverId,
+                    candidates.targetRide,
+                    new Date(),
+                    tx
+                  );
+                  if (!recheckDriver.isAvailable) {
                     return false;
                   }
 
@@ -565,6 +596,430 @@ class SchedulerService {
       console.error('[SchedulerService] Error running checkAndExpireDriverAssignments:', err);
     } finally {
       this.isCheckingExpiredAssignments = false;
+    }
+  }
+
+  /**
+   * Layer 4: Detects drivers who accepted a ride but have remained idle / waiting for >5 minutes
+   * without transitioning to EN_ROUTE (navigating to pickup).
+   * Sends high-priority warning to driver app and real-time alert to admin dashboard.
+   */
+  /**
+   * Layer 4: Detects drivers who accepted a ride but have remained idle / waiting for >5 minutes
+   * without transitioning to EN_ROUTE (navigating to pickup).
+   * Scheduled rides: max(acceptedAt, scheduledAt) + 300 seconds.
+   * Immediate rides: acceptedAt + 300 seconds.
+   * Sends high-priority warning to driver app and real-time alert to admin dashboard.
+   */
+  async checkDriverIdleDelays() {
+    if (this.isCheckingDriverIdleDelays) return;
+    this.isCheckingDriverIdleDelays = true;
+
+    try {
+      const now = new Date();
+      const IDLE_LIMIT_MS = 5 * 60 * 1000; // 300 seconds
+
+      // Find candidate rides: ACCEPTED status with an assigned driver
+      const candidateRides = await prisma.ride.findMany({
+        where: {
+          status: TripStatus.ACCEPTED,
+          driverId: { not: null },
+        },
+        select: {
+          id: true,
+          bookingCode: true,
+          driverId: true,
+          customerId: true,
+          stops: true,
+          createdAt: true,
+          updatedAt: true,
+          driver: {
+            include: {
+              user: { select: { id: true, name: true, phone: true } },
+            },
+          },
+          customer: { select: { id: true, name: true, phone: true } },
+        },
+      });
+
+      for (const ride of candidateRides) {
+        if (!ride.driverId) continue;
+
+        const meta = (ride.stops && typeof ride.stops === 'object') ? (ride.stops as any) : {};
+        const displayCode = ride.bookingCode || ride.id.slice(-6);
+
+        // Do not process if alert was already dispatched for this assignment
+        if (meta.idleAlertState === 'DISPATCHED' || meta.driverIdleAlertSentAt) {
+          continue;
+        }
+
+        // Active lease check: If currently processing by another scheduler instance within lease window (120s), skip
+        if (meta.idleAlertState === 'PROCESSING') {
+          const lastAttempt = meta.idleAlertLastAttemptAt ? new Date(meta.idleAlertLastAttemptAt).getTime() : 0;
+          if (now.getTime() - lastAttempt < 120000) {
+            continue; // Leased to an active execution
+          }
+        }
+
+        const acceptedAtTime = meta.acceptedAt
+          ? new Date(meta.acceptedAt).getTime()
+          : (ride.updatedAt ? new Date(ride.updatedAt).getTime() : new Date(ride.createdAt).getTime());
+
+        const isScheduled = !!meta.isScheduled || (typeof meta.scheduledAt === 'string' && meta.scheduledAt.trim().length > 0);
+
+        let alertThresholdTime: number;
+
+        if (isScheduled) {
+          // Scheduled ride validation: must have valid scheduledAt
+          if (!meta.scheduledAt || typeof meta.scheduledAt !== 'string' || meta.scheduledAt.trim().length === 0) {
+            console.warn(`[SchedulerService] ⚠️ Scheduled ride #${displayCode} (${ride.id}) missing scheduledAt date. Skipping safely.`);
+            continue;
+          }
+
+          const scheduledTime = new Date(meta.scheduledAt).getTime();
+          if (isNaN(scheduledTime)) {
+            console.warn(`[SchedulerService] ⚠️ Scheduled ride #${displayCode} (${ride.id}) has invalid scheduledAt date string "${meta.scheduledAt}". Skipping safely.`);
+            continue;
+          }
+
+          // Exact formula: max(acceptedAt, scheduledAt) + 300 seconds
+          const effectiveBaseTime = Math.max(acceptedAtTime, scheduledTime);
+          alertThresholdTime = effectiveBaseTime + IDLE_LIMIT_MS;
+        } else {
+          // Immediate ride threshold: acceptedAt + 300 seconds
+          alertThresholdTime = acceptedAtTime + IDLE_LIMIT_MS;
+        }
+
+        if (now.getTime() < alertThresholdTime) {
+          continue; // 5-minute threshold has not elapsed
+        }
+
+        const idleMinutes = Math.max(1, Math.floor((now.getTime() - alertThresholdTime + IDLE_LIMIT_MS) / 60000));
+        const assignmentId = meta.assignmentId || ride.driverId;
+        const driverName = ride.driver?.user?.name || 'Driver';
+        const driverUserId = ride.driver?.user?.id;
+
+        // Atomic multi-instance claim inside database transaction
+        const claimSucceeded = await prisma.$transaction(async (tx) => {
+          const fresh = await tx.ride.findUnique({
+            where: { id: ride.id },
+            select: { status: true, driverId: true, stops: true },
+          });
+          if (!fresh || fresh.status !== TripStatus.ACCEPTED || fresh.driverId !== ride.driverId) {
+            return false;
+          }
+          const freshMeta = (fresh.stops && typeof fresh.stops === 'object') ? (fresh.stops as any) : {};
+          if (freshMeta.idleAlertState === 'DISPATCHED' || freshMeta.driverIdleAlertSentAt) {
+            return false;
+          }
+          if (freshMeta.idleAlertState === 'PROCESSING') {
+            const attemptTime = freshMeta.idleAlertLastAttemptAt ? new Date(freshMeta.idleAlertLastAttemptAt).getTime() : 0;
+            if (now.getTime() - attemptTime < 120000) {
+              return false;
+            }
+          }
+
+          await tx.ride.update({
+            where: { id: ride.id },
+            data: {
+              stops: {
+                ...freshMeta,
+                isDriverIdle: true,
+                driverIdleMinutes: idleMinutes,
+                idleAlertState: 'PROCESSING',
+                idleAlertAttempts: (freshMeta.idleAlertAttempts || 0) + 1,
+                idleAlertLastAttemptAt: now.toISOString(),
+              },
+            },
+          });
+          return true;
+        });
+
+        if (!claimSucceeded) {
+          continue; // Claimed or completed by concurrent scheduler instance
+        }
+
+        console.log(`[SchedulerService] ⚠️ Driver idle alert dispatching for ride #${displayCode}: Driver ${driverName} idle for ${idleMinutes}m (Assignment: ${assignmentId}).`);
+
+        let dispatchSucceeded = false;
+        let dispatchError: string | null = null;
+
+        try {
+          // 1. Alert Driver via Push Notification (Outside DB transaction)
+          if (driverUserId) {
+            await notificationsService.sendToUser({
+              userId: driverUserId,
+              title: '⚠️ Action Required: Start Your Trip',
+              message: `You accepted Booking #${displayCode} ${idleMinutes} minutes ago. Please tap "Navigate to Pickup" to proceed, or Admin may reassign/cancel this ride.`,
+              type: 'driver_idle_warning',
+              data: {
+                rideId: ride.id,
+                bookingCode: ride.bookingCode || '',
+                action: 'START_NAVIGATION',
+                assignmentId,
+                driverId: ride.driverId,
+              },
+            });
+          }
+
+          // 2. Alert Admins via Push Notification
+          await notificationsService.sendToAdmins({
+            title: '⚠️ Driver Idle Alert (5+ Mins)',
+            message: `Driver ${driverName} accepted Booking #${displayCode} ${idleMinutes} mins ago but has not started navigating to pickup.`,
+            type: 'driver_idle_alert',
+            data: {
+              rideId: ride.id,
+              bookingCode: ride.bookingCode || '',
+              driverId: ride.driverId,
+              driverName,
+              idleMinutes: String(idleMinutes),
+              assignmentId,
+            },
+          });
+
+          // 3. Real-time broadcast to ride room (driver & customer) and admin fleet room
+          socketService.broadcastDriverIdleAlert(ride.id, {
+            rideId: ride.id,
+            bookingCode: ride.bookingCode || '',
+            driverId: ride.driverId,
+            driverName,
+            idleMinutes,
+            isDriverIdle: true,
+            assignmentId,
+            message: `Driver has been idle for ${idleMinutes} minutes without navigating.`,
+          });
+
+          dispatchSucceeded = true;
+        } catch (dispatchErr: any) {
+          dispatchError = dispatchErr?.message || String(dispatchErr);
+          console.error(`[SchedulerService] Notification delivery error for ride #${displayCode}:`, dispatchErr);
+        }
+
+        // Commit dispatch state based on delivery attempt outcome
+        const postRide = await prisma.ride.findUnique({
+          where: { id: ride.id },
+          select: { stops: true },
+        });
+        const postMeta = (postRide?.stops && typeof postRide.stops === 'object') ? (postRide.stops as any) : {};
+
+        await prisma.ride.update({
+          where: { id: ride.id },
+          data: {
+            stops: {
+              ...postMeta,
+              isDriverIdle: true,
+              driverIdleMinutes: idleMinutes,
+              idleAlertState: dispatchSucceeded ? 'DISPATCHED' : 'FAILED',
+              ...(dispatchSucceeded
+                ? {
+                    idleAlertDispatchedAt: now.toISOString(),
+                    driverIdleAlertSentAt: now.toISOString(),
+                  }
+                : {}),
+              idleAlertLastError: dispatchError,
+            },
+          },
+        });
+      }
+    } catch (err) {
+      console.error('[SchedulerService] Error checking driver idle delays:', err);
+    } finally {
+      this.isCheckingDriverIdleDelays = false;
+    }
+  }
+
+  /**
+   * Monitors immediate unassigned rides sitting in SEARCHING status (driverId = null)
+   * for >= 5 minutes (300 seconds) and emits an Admin attention alert.
+   * Rules:
+   * - Excludes scheduled rides.
+   * - Never cancels the ride, never releases capacity, never auto-assigns.
+   * - Uses atomic lease/retry state in stops JSONB so repeated runs never duplicate alerts
+   *   and failed notification deliveries are retried safely.
+   */
+  async checkUnassignedSearchingDelays(options?: { targetRideId?: string }) {
+    if (this.isCheckingUnassignedSearching) return;
+    this.isCheckingUnassignedSearching = true;
+
+    try {
+      const now = new Date();
+      const UNASSIGNED_LIMIT_MS = 5 * 60 * 1000; // 300 seconds
+      const thresholdDate = new Date(now.getTime() - UNASSIGNED_LIMIT_MS);
+
+      const candidateRides = await prisma.ride.findMany({
+        where: {
+          ...(options?.targetRideId ? { id: options.targetRideId } : {}),
+          status: TripStatus.SEARCHING,
+          driverId: null,
+          createdAt: { lte: thresholdDate },
+        },
+        select: {
+          id: true,
+          bookingCode: true,
+          customerId: true,
+          pickupLocation: true,
+          dropLocation: true,
+          stops: true,
+          createdAt: true,
+          customer: { select: { id: true, name: true, phone: true } },
+        },
+      });
+
+      for (const ride of candidateRides) {
+        const meta = (ride.stops && typeof ride.stops === 'object') ? (ride.stops as any) : {};
+        const displayCode = ride.bookingCode || ride.id.slice(-6);
+
+        const isScheduled =
+          !!meta.isScheduled ||
+          (typeof meta.scheduledAt === 'string' && meta.scheduledAt.trim().length > 0);
+        if (isScheduled) {
+          continue; // Scheduled rides are excluded
+        }
+
+        if (meta.unassignedAlertState === 'DISPATCHED' || meta.unassignedAlertSentAt) {
+          continue;
+        }
+
+        if (meta.unassignedAlertState === 'PROCESSING') {
+          const lastAttempt = meta.unassignedAlertLastAttemptAt
+            ? new Date(meta.unassignedAlertLastAttemptAt).getTime()
+            : 0;
+          if (now.getTime() - lastAttempt < 120000) {
+            continue; // Active lease held by another worker
+          }
+        }
+
+        const createdAtMs = new Date(ride.createdAt).getTime();
+        if (now.getTime() - createdAtMs < UNASSIGNED_LIMIT_MS) {
+          continue;
+        }
+
+        const waitingMinutes = Math.max(5, Math.floor((now.getTime() - createdAtMs) / 60000));
+        const seatCap = Number(meta.seatCapacity) || (
+          String(meta.requestedSeats || meta.requestedVehicle || '').includes('6') ? 6 : 4
+        );
+        const categoryLabel = seatCap >= 6 ? '6-Seater' : '4-Seater';
+
+        // Atomic multi-instance lease claim
+        const claimSucceeded = await prisma.$transaction(async (tx) => {
+          const fresh = await tx.ride.findUnique({
+            where: { id: ride.id },
+            select: { status: true, driverId: true, stops: true },
+          });
+          if (!fresh || fresh.status !== TripStatus.SEARCHING || fresh.driverId !== null) {
+            return false;
+          }
+          const freshMeta = (fresh.stops && typeof fresh.stops === 'object') ? (fresh.stops as any) : {};
+          const freshIsScheduled =
+            !!freshMeta.isScheduled ||
+            (typeof freshMeta.scheduledAt === 'string' && freshMeta.scheduledAt.trim().length > 0);
+          if (freshIsScheduled) {
+            return false;
+          }
+          if (freshMeta.unassignedAlertState === 'DISPATCHED' || freshMeta.unassignedAlertSentAt) {
+            return false;
+          }
+          if (freshMeta.unassignedAlertState === 'PROCESSING') {
+            const attemptTime = freshMeta.unassignedAlertLastAttemptAt
+              ? new Date(freshMeta.unassignedAlertLastAttemptAt).getTime()
+              : 0;
+            if (now.getTime() - attemptTime < 120000) {
+              return false;
+            }
+          }
+
+          await tx.ride.update({
+            where: { id: ride.id },
+            data: {
+              stops: {
+                ...freshMeta,
+                unassignedAlertState: 'PROCESSING',
+                unassignedAlertAttempts: (freshMeta.unassignedAlertAttempts || 0) + 1,
+                unassignedAlertLastAttemptAt: now.toISOString(),
+              },
+            },
+          });
+          return true;
+        });
+
+        if (!claimSucceeded) {
+          continue;
+        }
+
+        console.log(
+          `[SchedulerService] ⏳ Unassigned SEARCHING alert dispatching for ride #${displayCode} (${categoryLabel}, waiting ${waitingMinutes}m).`
+        );
+
+        let dispatchSucceeded = false;
+        let dispatchError: string | null = null;
+
+        try {
+          const notifResult = await notificationsService.sendToAdmins({
+            title: '⏳ Unassigned Ride Waiting (5+ Mins)',
+            message: `Booking #${displayCode} (${categoryLabel}) has been waiting in SEARCHING for ${waitingMinutes} mins without an assigned driver. Action required (assign or cancel).`,
+            type: 'unassigned_ride_alert',
+            data: {
+              rideId: ride.id,
+              bookingCode: ride.bookingCode || '',
+              category: categoryLabel,
+              waitingMinutes: String(waitingMinutes),
+              status: 'SEARCHING',
+            },
+          });
+
+          if (notifResult && notifResult.success === false) {
+            throw new Error(notifResult.message || 'Admin notification dispatch returned success=false');
+          }
+
+          socketService.getIO()?.to('admin_live_fleet').emit('unassigned_ride_alert', {
+            rideId: ride.id,
+            bookingCode: ride.bookingCode || '',
+            category: categoryLabel,
+            seatCapacity: seatCap,
+            waitingMinutes,
+            pickupLocation: ride.pickupLocation,
+            dropLocation: ride.dropLocation,
+            customerName: ride.customer?.name || 'Customer',
+            status: 'SEARCHING',
+            message: `Unassigned ride #${displayCode} waiting for ${waitingMinutes} minutes.`,
+          });
+
+          dispatchSucceeded = true;
+        } catch (dispatchErr: any) {
+          dispatchError = dispatchErr?.message || String(dispatchErr);
+          console.error(
+            `[SchedulerService] Unassigned ride alert delivery error for #${displayCode}:`,
+            dispatchErr
+          );
+        }
+
+        const postRide = await prisma.ride.findUnique({
+          where: { id: ride.id },
+          select: { stops: true },
+        });
+        const postMeta = (postRide?.stops && typeof postRide.stops === 'object') ? (postRide.stops as any) : {};
+
+        await prisma.ride.update({
+          where: { id: ride.id },
+          data: {
+            stops: {
+              ...postMeta,
+              unassignedAlertState: dispatchSucceeded ? 'DISPATCHED' : 'FAILED',
+              ...(dispatchSucceeded
+                ? {
+                    unassignedAlertDispatchedAt: now.toISOString(),
+                    unassignedAlertSentAt: now.toISOString(),
+                  }
+                : {}),
+              unassignedAlertLastError: dispatchError,
+            },
+          },
+        });
+      }
+    } catch (err) {
+      console.error('[SchedulerService] Error checking unassigned SEARCHING delays:', err);
+    } finally {
+      this.isCheckingUnassignedSearching = false;
     }
   }
 

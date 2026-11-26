@@ -1,4 +1,5 @@
 import { prisma } from '../../config/prisma';
+import type { Prisma } from '../../generated/prisma/client';
 import { standardizeTripType, StandardizedTripType } from '../../utils/trip-type.helper';
 import { unavailabilityService } from '../unavailability/unavailability.service';
 import { vehiclesService } from '../vehicles/vehicles.service';
@@ -212,14 +213,16 @@ export class DriverAvailabilityService {
   async evaluateDriverAvailability(
     driverId: string,
     targetRide: RideEvaluationTarget,
-    now: Date = new Date()
+    now: Date = new Date(),
+    tx?: Prisma.TransactionClient
   ): Promise<DriverAvailabilityResult> {
+    const db = tx ?? prisma;
     const wrap = (res: Omit<DriverAvailabilityResult, 'driverId'>): DriverAvailabilityResult => ({
       driverId,
       ...res,
     });
 
-    const driver = await prisma.driverProfile.findUnique({
+    const driver = await db.driverProfile.findUnique({
       where: { id: driverId },
       include: {
         user: { select: { id: true, name: true, phone: true, isActive: true } },
@@ -282,15 +285,35 @@ export class DriverAvailabilityService {
       });
     }
 
-    // Check Seat Capacity Requirement
-    if (targetRide.seatCapacity && effectiveVehicle.seatCapacity < targetRide.seatCapacity) {
-      return wrap({
-        isAvailable: false,
-        reasonCode: 'SEATS_INSUFFICIENT',
-        reasonMessage: `Ride requires ${targetRide.seatCapacity} seats, but vehicle only has ${effectiveVehicle.seatCapacity} seats.`,
-        driver,
-        vehicle: effectiveVehicle,
-      });
+    // Strict 4-Seater / 6-Seater Category & Seat Capacity Matching (Rules 1, 2, 3, 5)
+    if (targetRide.seatCapacity) {
+      if (targetRide.seatCapacity >= 6 && effectiveVehicle.seatCapacity < 6) {
+        return wrap({
+          isAvailable: false,
+          reasonCode: 'SEATS_INSUFFICIENT',
+          reasonMessage: `Ride requires 6 seats, but vehicle only has ${effectiveVehicle.seatCapacity} seats.`,
+          driver,
+          vehicle: effectiveVehicle,
+        });
+      }
+      if (targetRide.seatCapacity <= 4 && effectiveVehicle.seatCapacity >= 6) {
+        return wrap({
+          isAvailable: false,
+          reasonCode: 'CATEGORY_MISMATCH',
+          reasonMessage: `4-Seater ride must match only 4-Seater vehicles; 6-Seater (${effectiveVehicle.seatCapacity} seats) cannot be substituted.`,
+          driver,
+          vehicle: effectiveVehicle,
+        });
+      }
+      if (effectiveVehicle.seatCapacity < targetRide.seatCapacity) {
+        return wrap({
+          isAvailable: false,
+          reasonCode: 'SEATS_INSUFFICIENT',
+          reasonMessage: `Ride requires ${targetRide.seatCapacity} seats, but vehicle only has ${effectiveVehicle.seatCapacity} seats.`,
+          driver,
+          vehicle: effectiveVehicle,
+        });
+      }
     }
 
     // Check Elite / Luxury Category Match
@@ -363,7 +386,7 @@ export class DriverAvailabilityService {
     // 4. Evaluate Active Ongoing / En-route Trip (Section 2.A)
     // A trip is currently active if it is ONGOING, EN_ROUTE, ARRIVED,
     // or an immediate ACCEPTED ride. Future scheduled rides are evaluated in Step 6.
-    const activeCandidates = await prisma.ride.findMany({
+    const activeCandidates = await db.ride.findMany({
       where: {
         driverId: driver.id,
         id: { not: targetRide.id },
@@ -494,7 +517,7 @@ export class DriverAvailabilityService {
     const targetEndMs = targetStartMs + targetDurMins * 60 * 1000;
 
     // Fetch all existing upcoming / scheduled rides for this driver
-    const upcomingRides = await prisma.ride.findMany({
+    const upcomingRides = await db.ride.findMany({
       where: {
         driverId: driver.id,
         id: { notIn: [targetRide.id, ...(activeTrip ? [activeTrip.id] : [])] },
@@ -656,6 +679,165 @@ export class DriverAvailabilityService {
       targetRide,
       availableDrivers,
       unavailableDrivers,
+    };
+  }
+
+  /**
+   * Check live pickup-area availability for 4-seater and 6-seater vehicle categories.
+   * Reuses the exact same evaluateDriverAvailability() engine used during assignment.
+   */
+  async checkCategoryAvailability(params: {
+    pickupLat: number;
+    pickupLng: number;
+    dropLat?: number;
+    dropLng?: number;
+    tripType?: string;
+    customTripType?: string;
+    isScheduled?: boolean;
+    scheduledAt?: Date | null;
+    tx?: Prisma.TransactionClient;
+  }): Promise<{
+    fourSeater: { available: boolean; count: number; nearestDistanceKm: number | null };
+    sixSeater: { available: boolean; count: number; nearestDistanceKm: number | null };
+    isScheduled: boolean;
+  }> {
+    const { pickupLat, pickupLng, dropLat, dropLng, tripType, customTripType, isScheduled, scheduledAt, tx } = params;
+    const db = tx ?? prisma;
+
+    const stdTripType = standardizeTripType({
+      customTripType,
+      tripType,
+      distanceKm: 10,
+    });
+
+    const isSched = !!isScheduled && !!scheduledAt;
+
+    // Create target evaluations for 4-seater and 6-seater
+    const targetRide4: RideEvaluationTarget = {
+      id: 'preview_4_seater',
+      pickupLat,
+      pickupLng,
+      dropLat: dropLat ?? pickupLat,
+      dropLng: dropLng ?? pickupLng,
+      distanceKm: 10,
+      tripType: stdTripType,
+      isScheduled: isSched,
+      scheduledAt: isSched ? scheduledAt : null,
+      seatCapacity: 4,
+      isElite: false,
+      category: 'REGULAR',
+    };
+
+    const targetRide6: RideEvaluationTarget = {
+      id: 'preview_6_seater',
+      pickupLat,
+      pickupLng,
+      dropLat: dropLat ?? pickupLat,
+      dropLng: dropLng ?? pickupLng,
+      distanceKm: 10,
+      tripType: stdTripType,
+      isScheduled: isSched,
+      scheduledAt: isSched ? scheduledAt : null,
+      seatCapacity: 6,
+      isElite: false,
+      category: 'REGULAR',
+    };
+
+    const allApprovedDrivers = await db.driverProfile.findMany({
+      where: {
+        approvalStatus: 'APPROVED',
+      },
+      include: {
+        user: { select: { id: true, name: true, phone: true, isActive: true } },
+        assignedVehicle: true,
+        ownedVehicles: true,
+      },
+    });
+
+    let fourSeaterCount = 0;
+    let sixSeaterCount = 0;
+    let fourSeaterNearestDist: number | null = null;
+    let sixSeaterNearestDist: number | null = null;
+    const now = new Date();
+
+    for (const d of allApprovedDrivers) {
+      // 1. Evaluate 6-seater eligibility
+      const res6 = await this.evaluateDriverAvailability(d.id, targetRide6, now, tx);
+      if (res6.isAvailable) {
+        sixSeaterCount++;
+        const dist = res6.pickupDistanceKm ?? null;
+        if (dist !== null && (sixSeaterNearestDist === null || dist < sixSeaterNearestDist)) {
+          sixSeaterNearestDist = dist;
+        }
+      }
+
+      // 2. Evaluate 4-seater eligibility (strictly 4-seater vehicles only)
+      const res4 = await this.evaluateDriverAvailability(d.id, targetRide4, now, tx);
+      if (res4.isAvailable) {
+        fourSeaterCount++;
+        const dist = res4.pickupDistanceKm ?? null;
+        if (dist !== null && (fourSeaterNearestDist === null || dist < fourSeaterNearestDist)) {
+          fourSeaterNearestDist = dist;
+        }
+      }
+    }
+
+    // For immediate availability, subtract unassigned immediate SEARCHING rides per category.
+    // Rules 6-11:
+    // - Assigned SEARCHING rides (driverId != null) are already excluded above and must NOT be double-counted.
+    // - Scheduled rides do NOT consume immediate fleet capacity.
+    // - Unassigned SEARCHING rides reserve capacity until Admin or Customer cancels.
+    let netFourCount = fourSeaterCount;
+    let netSixCount = sixSeaterCount;
+
+    if (!isSched) {
+      const openSearchingRides = await db.ride.findMany({
+        where: {
+          status: 'SEARCHING',
+          driverId: null,
+        },
+        select: {
+          id: true,
+          stops: true,
+        },
+      });
+
+      let openFourDemand = 0;
+      let openSixDemand = 0;
+
+      for (const r of openSearchingRides) {
+        const meta = (r.stops && typeof r.stops === 'object') ? (r.stops as any) : {};
+        const rIsScheduled =
+          !!meta.isScheduled ||
+          (typeof meta.scheduledAt === 'string' && meta.scheduledAt.trim().length > 0);
+        if (rIsScheduled) continue;
+
+        const rSeatCap = Number(meta.seatCapacity) || (
+          String(meta.requestedSeats || meta.requestedVehicle || '').includes('6') ? 6 : 4
+        );
+        if (rSeatCap >= 6) {
+          openSixDemand++;
+        } else {
+          openFourDemand++;
+        }
+      }
+
+      netFourCount = Math.max(0, fourSeaterCount - openFourDemand);
+      netSixCount = Math.max(0, sixSeaterCount - openSixDemand);
+    }
+
+    return {
+      fourSeater: {
+        available: netFourCount > 0,
+        count: netFourCount,
+        nearestDistanceKm: netFourCount > 0 ? fourSeaterNearestDist : null,
+      },
+      sixSeater: {
+        available: netSixCount > 0,
+        count: netSixCount,
+        nearestDistanceKm: netSixCount > 0 ? sixSeaterNearestDist : null,
+      },
+      isScheduled: isSched,
     };
   }
 }
