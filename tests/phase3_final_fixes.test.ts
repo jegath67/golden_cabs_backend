@@ -281,9 +281,12 @@ async function main() {
     });
     createdRideIds.push(expRide2.id);
 
+    const custRace1 = await createTestUser('CUSTOMER', '102');
+    const custRace2 = await createTestUser('CUSTOMER', '103');
+
     const [redispRace, bookRace1, bookRace2] = await Promise.all([
       schedulerService.checkAndExpireDriverAssignments(),
-      callPublicRequestRide(cust.id, {
+      callPublicRequestRide(custRace1.id, {
         pickupLocation: 'White Town',
         pickupLat: 11.9416,
         pickupLng: 79.8083,
@@ -292,7 +295,7 @@ async function main() {
         dropLng: 79.81,
         seatCapacity: 6,
       }),
-      callPublicRequestRide(cust.id, {
+      callPublicRequestRide(custRace2.id, {
         pickupLocation: 'White Town',
         pickupLat: 11.9416,
         pickupLng: 79.8083,

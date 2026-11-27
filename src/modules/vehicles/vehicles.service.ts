@@ -312,7 +312,9 @@ export class VehiclesService {
   async assignVehicleToDriver(vehicleId: string, driverProfileId: string | null) {
     if (!driverProfileId) {
       // Unassign driver from vehicle
-      const existingVehicle = await prisma.$transaction(async (tx) => {
+      let previousDriver: any = null;
+
+      const updatedVehicle = await prisma.$transaction(async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(202611, 1)`;
 
         const found = await tx.vehicle.findUnique({
@@ -324,7 +326,12 @@ export class VehiclesService {
           },
         });
 
-        if (found?.assignedDriver) {
+        if (!found) {
+          throw new Error('Vehicle not found');
+        }
+
+        if (found.assignedDriver) {
+          previousDriver = found.assignedDriver;
           // Automatically put driver off shift when vehicle is unassigned
           await tx.driverProfile.update({
             where: { id: found.assignedDriver.id },
@@ -338,34 +345,35 @@ export class VehiclesService {
           });
         }
 
-        return found;
+        // Return updated vehicle where assignedDriver relation is now cleanly disconnected
+        return tx.vehicle.findUnique({
+          where: { id: vehicleId },
+          include: {
+            assignedDriver: {
+              include: { user: true },
+            },
+          },
+        });
       });
 
-      if (existingVehicle?.assignedDriver) {
+      if (previousDriver) {
         // Send notification to the driver
-        if (existingVehicle.assignedDriver.userId) {
+        if (previousDriver.userId) {
           await notificationsService.sendToUser({
-            userId: existingVehicle.assignedDriver.userId,
+            userId: previousDriver.userId,
             title: '🚗 Vehicle De-allocated',
-            message: `${existingVehicle.brand} ${existingVehicle.model} (${existingVehicle.vehicleNumber}) has been unassigned. Please request a new vehicle from Hub to go online.`,
+            message: `${updatedVehicle?.brand || 'Vehicle'} ${updatedVehicle?.model || ''} (${updatedVehicle?.vehicleNumber || ''}) has been unassigned. Please request a new vehicle from Hub to go online.`,
             type: 'vehicle_unassignment',
             data: {
-              vehicleId: existingVehicle.id,
-              vehicleNumber: existingVehicle.vehicleNumber,
+              vehicleId: updatedVehicle?.id || vehicleId,
+              vehicleNumber: updatedVehicle?.vehicleNumber || '',
             },
             saveToDb: true,
           }).catch((err) => console.error('Error notifying driver of unassignment:', err));
         }
       }
 
-      return prisma.vehicle.update({
-        where: { id: vehicleId },
-        data: {
-          assignedDriver: {
-            disconnect: true,
-          },
-        },
-      });
+      return updatedVehicle;
     }
 
     // 1. Fetch target driver

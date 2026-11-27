@@ -191,6 +191,7 @@ export class RidesService {
     riderName?: string;
     riderPhone?: string;
     skipAvailabilityCheck?: boolean;
+    skipActiveRideCheck?: boolean;
   }) {
     const clientDist = typeof data.distanceKm === 'number' && data.distanceKm > 0 ? Number(data.distanceKm.toFixed(1)) : undefined;
     const seatCapPre = data.seatCapacity || (data.requestedSeats?.includes('6') || data.requestedVehicle?.includes('6') ? 6 : 4);
@@ -243,6 +244,7 @@ export class RidesService {
     const isScheduledBooking = !!(data.scheduledAt && data.scheduledAt.trim().length > 0 && data.scheduledAt !== 'Pick-up now');
     let validatedScheduledAt: string | null = null;
     let scheduledDisplayStr: string | null = null;
+    let targetScheduledDate: Date | null = null;
     if (isScheduledBooking) {
       const parsedDate = parseScheduledPickupTime(data.scheduledAt);
       if (!parsedDate || isNaN(parsedDate.getTime())) {
@@ -251,6 +253,7 @@ export class RidesService {
       if (parsedDate.getTime() <= Date.now()) {
         throw new Error('Scheduled pickup time must be in the future');
       }
+      targetScheduledDate = parsedDate;
       validatedScheduledAt = parsedDate.toISOString();
       scheduledDisplayStr = parsedDate.toLocaleDateString('en-GB', {
         day: '2-digit',
@@ -263,6 +266,146 @@ export class RidesService {
         hour12: true,
         timeZone: 'Asia/Kolkata',
       });
+    }
+
+    // Customer ride concurrency & duplicate/overlapping booking validation
+    if (!data.skipActiveRideCheck) {
+      const customerUser = await prisma.user.findUnique({
+        where: { id: customerId },
+        select: { phone: true, name: true },
+      });
+      const normalizedCustomerPhone = (customerUser?.phone || '').replace(/\D/g, '').slice(-10);
+      const cleanRiderPhone = (data.riderPhone || '').replace(/\D/g, '').slice(-10);
+      const isRiderNameForMe = !data.riderName || data.riderName.trim().toLowerCase() === 'for me';
+      const isForMe = isRiderNameForMe || !cleanRiderPhone || (normalizedCustomerPhone.length >= 10 && cleanRiderPhone === normalizedCustomerPhone);
+
+      const openRides = await prisma.ride.findMany({
+        where: {
+          customerId,
+          status: { in: ['SEARCHING', 'ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] },
+        },
+        select: {
+          id: true,
+          bookingCode: true,
+          status: true,
+          stops: true,
+          createdAt: true,
+        },
+      });
+
+      const nowMs = Date.now();
+      const activeInstantRides: typeof openRides = [];
+      const upcomingScheduledRides: { ride: typeof openRides[0]; scheduledTimeMs: number; riderPhone: string; isForMe: boolean }[] = [];
+
+      for (const r of openRides) {
+        const meta = (r.stops as any) || {};
+        const isSched = !!meta.isScheduled || (typeof meta.scheduledAt === 'string' && meta.scheduledAt.trim().length > 0);
+        const schedTimeMs = isSched && meta.scheduledAt ? new Date(meta.scheduledAt).getTime() : null;
+
+        if (isSched && schedTimeMs != null && schedTimeMs > nowMs) {
+          const existingRiderPhone = (meta.riderPhone || '').replace(/\D/g, '').slice(-10);
+          const existingIsForMe = !existingRiderPhone || (normalizedCustomerPhone.length >= 10 && existingRiderPhone === normalizedCustomerPhone);
+          upcomingScheduledRides.push({
+            ride: r,
+            scheduledTimeMs: schedTimeMs,
+            riderPhone: existingRiderPhone,
+            isForMe: existingIsForMe,
+          });
+        } else {
+          activeInstantRides.push(r);
+        }
+      }
+
+      // Safety Cap: Maximum concurrent active instant rides per account
+      if (activeInstantRides.length >= 4) {
+        const err: any = new Error('You have reached the maximum active ride limit (4 active rides). Please wait for ongoing rides to complete.');
+        err.statusCode = 400;
+        throw err;
+      }
+
+      if (!isScheduledBooking) {
+        // INSTANT RIDE CHECKS
+        if (isForMe) {
+          const existingForMe = activeInstantRides.find((r) => {
+            const meta = (r.stops as any) || {};
+            const rPhone = (meta.riderPhone || '').replace(/\D/g, '').slice(-10);
+            return !rPhone || (normalizedCustomerPhone.length >= 10 && rPhone === normalizedCustomerPhone);
+          });
+
+          if (existingForMe) {
+            const err: any = new Error('You already have an active ride in progress. You cannot book another ride for yourself at the same time.');
+            err.statusCode = 400;
+            throw err;
+          }
+        } else {
+          // FOR ANOTHER PERSON (Instant):
+          // Multiple rides allowed for different persons, but prevent duplicate active ride for the exact same contact phone
+          if (cleanRiderPhone.length >= 10) {
+            const existingForContact = activeInstantRides.find((r) => {
+              const meta = (r.stops as any) || {};
+              const rPhone = (meta.riderPhone || '').replace(/\D/g, '').slice(-10);
+              return rPhone === cleanRiderPhone;
+            });
+
+            if (existingForContact) {
+              const err: any = new Error(`An active ride is already in progress for contact (${data.riderPhone}). Please wait for it to complete.`);
+              err.statusCode = 400;
+              throw err;
+            }
+          }
+        }
+      } else {
+        // SCHEDULED RIDE CHECKS
+        if (targetScheduledDate) {
+          const targetTimeMs = targetScheduledDate.getTime();
+          const BUFFER_WINDOW_MS = 45 * 60 * 1000; // 45-minute window for overlapping scheduled rides
+
+          if (isForMe) {
+            // Check if customer already has an overlapping scheduled ride for themselves
+            const conflictingScheduled = upcomingScheduledRides.find((item) => {
+              if (!item.isForMe) return false;
+              return Math.abs(item.scheduledTimeMs - targetTimeMs) < BUFFER_WINDOW_MS;
+            });
+
+            if (conflictingScheduled) {
+              const meta = (conflictingScheduled.ride.stops as any) || {};
+              const err: any = new Error(`You already have a ride scheduled around this time (${meta.scheduledDisplay || new Date(conflictingScheduled.scheduledTimeMs).toLocaleTimeString()}). Please choose a different time.`);
+              err.statusCode = 400;
+              throw err;
+            }
+
+            // Also check if customer is currently in an ongoing trip that conflicts with a near scheduled time (< 30 min)
+            if (targetTimeMs - nowMs < 30 * 60 * 1000) {
+              const hasOngoingForMe = activeInstantRides.some((r) => {
+                const meta = (r.stops as any) || {};
+                const rPhone = (meta.riderPhone || '').replace(/\D/g, '').slice(-10);
+                return (!rPhone || (normalizedCustomerPhone.length >= 10 && rPhone === normalizedCustomerPhone)) && ['ONGOING', 'ARRIVED', 'EN_ROUTE'].includes(r.status);
+              });
+              if (hasOngoingForMe) {
+                const err: any = new Error('You currently have an active trip in progress. Please choose a later pickup time.');
+                err.statusCode = 400;
+                throw err;
+              }
+            }
+          } else {
+            // For another person: multiple scheduled rides allowed for different persons,
+            // but same contact cannot have overlapping scheduled rides around the same time
+            if (cleanRiderPhone.length >= 10) {
+              const conflictingForContact = upcomingScheduledRides.find((item) => {
+                if (item.riderPhone !== cleanRiderPhone) return false;
+                return Math.abs(item.scheduledTimeMs - targetTimeMs) < BUFFER_WINDOW_MS;
+              });
+
+              if (conflictingForContact) {
+                const meta = (conflictingForContact.ride.stops as any) || {};
+                const err: any = new Error(`A ride is already scheduled for contact (${data.riderPhone}) around this time (${meta.scheduledDisplay || new Date(conflictingForContact.scheduledTimeMs).toLocaleTimeString()}).`);
+                err.statusCode = 400;
+                throw err;
+              }
+            }
+          }
+        }
+      }
     }
 
     // Preserve intermediate stops (support up to 4 stops)
