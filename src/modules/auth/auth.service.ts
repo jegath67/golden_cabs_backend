@@ -2,6 +2,12 @@ import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
 import { prisma } from '../../config/prisma';
 import { notificationsService } from '../notifications/notifications.service';
+import {
+  isValidAadhaar,
+  isValidDrivingLicense,
+  normalizeAadhaar,
+  normalizeDrivingLicense,
+} from '../../utils/document-validators';
 
 export type OtpPurpose = 'LOGIN' | 'REGISTER' | 'RESET_PASSWORD';
 
@@ -102,7 +108,7 @@ export class AuthService {
    * Never logs raw OTP or full phone number.
    * Never exposes devOtp in production responses.
    */
-  async sendOtp(phone: string, intent?: 'REGISTER' | 'LOGIN' | 'RESET_PASSWORD' | string) {
+  async sendOtp(phone: string, intent?: 'REGISTER' | 'LOGIN' | 'RESET_PASSWORD' | string, role?: string) {
     if (!phone || typeof phone !== 'string' || phone.trim().length === 0) {
       const err: any = new Error('Phone number is required');
       err.statusCode = 400;
@@ -148,17 +154,39 @@ export class AuthService {
     }
 
     if (purpose === 'LOGIN') {
-      const existing = await prisma.user.findFirst({
-        where: {
-          OR: [
-            { phone: cleanPhone },
-            { phone: `+91${cleanPhone}` },
-            { phone: `91${cleanPhone}` },
-          ],
-        },
-      });
-      if (!existing) {
-        throw new Error('No account found with this mobile number. Please register to get started.');
+      const isDriverRole = role?.toUpperCase() === 'DRIVER';
+
+      if (isDriverRole) {
+        const driverUser = await prisma.user.findFirst({
+          where: {
+            OR: [
+              { phone: cleanPhone },
+              { phone: `+91${cleanPhone}` },
+              { phone: `91${cleanPhone}` },
+            ],
+          },
+          include: { driverProfile: true },
+        });
+
+        if (!driverUser || !driverUser.driverProfile) {
+          const err: any = new Error('No driver account found with this mobile number. Please register to get started.');
+          err.statusCode = 404;
+          err.code = 'DRIVER_NOT_FOUND';
+          throw err;
+        }
+      } else {
+        const existing = await prisma.user.findFirst({
+          where: {
+            OR: [
+              { phone: cleanPhone },
+              { phone: `+91${cleanPhone}` },
+              { phone: `91${cleanPhone}` },
+            ],
+          },
+        });
+        if (!existing) {
+          throw new Error('No account found with this mobile number. Please register to get started.');
+        }
       }
     }
 
@@ -225,7 +253,8 @@ export class AuthService {
     phone: string,
     otp: string,
     role: 'CUSTOMER' | 'DRIVER' = 'CUSTOMER',
-    name?: string
+    name?: string,
+    address?: string
   ) {
     if (!phone || !otp) {
       const err: any = new Error('Phone and OTP are required');
@@ -334,7 +363,9 @@ export class AuthService {
           name: name && name.trim().length > 0 ? name.trim() : 'New Customer',
           role: 'CUSTOMER',
           customerProfile: {
-            create: {},
+            create: {
+              ...(address && address.trim().length > 0 ? { address: address.trim() } : {}),
+            },
           },
         },
         include: {
@@ -357,8 +388,19 @@ export class AuthService {
         });
       }
 
-      // If user exists but role profile is missing, create it
-      if (!user.customerProfile) {
+      // If user exists, create or update customerProfile with address if provided
+      if (address && address.trim().length > 0) {
+        if (!user.customerProfile) {
+          await prisma.customerProfile.create({
+            data: { userId: user.id, address: address.trim() },
+          });
+        } else if (!user.customerProfile.address || user.customerProfile.address.trim().length === 0) {
+          await prisma.customerProfile.update({
+            where: { userId: user.id },
+            data: { address: address.trim() },
+          });
+        }
+      } else if (!user.customerProfile) {
         await prisma.customerProfile.create({
           data: { userId: user.id },
         });
@@ -806,19 +848,42 @@ export class AuthService {
       throw err;
     }
 
-    const licenseNumber = (data.licenseNumber || '').trim();
-    if (!licenseNumber) {
-      const err: any = new Error('Driving licence number is required');
-      err.statusCode = 400;
-      throw err;
-    }
-
     let normalizedPersona: 'DRIVE_ONLY' | 'OWN_VEHICLE' | 'RENTAL' = 'DRIVE_ONLY';
     const rawPersona = (data.personaType || '').toUpperCase();
     if (rawPersona === 'OWN_VEHICLE' || rawPersona === 'DRIVER_AND_VEHICLE') {
       normalizedPersona = 'OWN_VEHICLE';
     } else if (rawPersona === 'RENTAL' || rawPersona === 'VEHICLE_ONLY' || rawPersona === 'VEHICLEPROVIDER') {
       normalizedPersona = 'RENTAL';
+    }
+
+    const licenseNumber = normalizeDrivingLicense(data.licenseNumber);
+    if (normalizedPersona !== 'RENTAL') {
+      if (!licenseNumber) {
+        const err: any = new Error('Driving licence number is required');
+        err.statusCode = 400;
+        throw err;
+      }
+      if (!isValidDrivingLicense(licenseNumber)) {
+        const err: any = new Error('Invalid driving licence format (e.g. TN0120230001234 or TN-01-2023-0001234)');
+        err.statusCode = 400;
+        throw err;
+      }
+    } else {
+      // For RENTAL persona, licence is optional, but if provided, validate format
+      if (licenseNumber && !isValidDrivingLicense(licenseNumber)) {
+        const err: any = new Error('Invalid driving licence format (e.g. TN0120230001234 or TN-01-2023-0001234)');
+        err.statusCode = 400;
+        throw err;
+      }
+    }
+
+    const aadharNumber = normalizeAadhaar(data.aadharNumber || data.aadhaarNumber);
+    if (aadharNumber) {
+      if (!isValidAadhaar(aadharNumber)) {
+        const err: any = new Error('Invalid Aadhaar number format or checksum');
+        err.statusCode = 400;
+        throw err;
+      }
     }
 
     // Check for duplicate driver registration
@@ -888,11 +953,11 @@ export class AuthService {
           approvalStatus: 'PENDING',
           shiftStatus: 'OFF_SHIFT',
           isOnline: false,
-          licenseNumber: licenseNumber,
+          licenseNumber: licenseNumber || null,
           licenseExpiry: data.licenseExpiry || null,
           licenseFront: data.licenseFront || null,
           licenseBack: data.licenseBack || null,
-          aadharNumber: data.aadharNumber || null,
+          aadharNumber: aadharNumber || null,
           aadharFront: data.aadharFront || null,
           aadharBack: data.aadharBack || null,
           panNumber: data.panNumber || null,

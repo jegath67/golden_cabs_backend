@@ -4,7 +4,7 @@ import { formatAdminCode } from '../admin/admin.controller';
 
 export class AuthController {
   async sendOtp(req: FastifyRequest<any>, reply: FastifyReply) {
-    const { phone, intent } = (req.body as any) || {};
+    const { phone, intent, role } = (req.body as any) || {};
 
     if (!phone) {
       return reply.status(400).send({
@@ -14,21 +14,23 @@ export class AuthController {
     }
 
     try {
-      const result = await authService.sendOtp(phone, intent);
+      const result = await authService.sendOtp(phone, intent, role);
       return reply.send({
         success: true,
         ...result,
       });
     } catch (error: any) {
-      return reply.status(400).send({
+      const statusCode = error.statusCode || 400;
+      return reply.status(statusCode).send({
         success: false,
         message: error.message || 'Failed to send OTP',
+        code: error.code,
       });
     }
   }
 
   async verifyOtp(req: FastifyRequest<any>, reply: FastifyReply) {
-    const { phone, otp, role = 'CUSTOMER', name } = (req.body as any) || {};
+    const { phone, otp, role = 'CUSTOMER', name, address } = (req.body as any) || {};
 
     if (!phone || !otp) {
       return reply.status(400).send({
@@ -42,7 +44,8 @@ export class AuthController {
         phone,
         otp,
         role,
-        name
+        name,
+        address
       );
 
       if (role === 'DRIVER' && result.isNewUser) {

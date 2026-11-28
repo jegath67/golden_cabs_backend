@@ -41,4 +41,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // Live Map Tracking Endpoint
   app.get('/live-map', adminGuard, adminController.getLiveMapData.bind(adminController));
+
+  // Sidebar Notification Badge Counts Endpoint
+  app.get('/sidebar-badges', adminGuard, adminController.getSidebarBadges.bind(adminController));
 }

@@ -6,6 +6,12 @@ import { locationCacheService } from './location-cache.service';
 import { vehiclesService } from '../vehicles/vehicles.service';
 import { walletService } from '../wallet/wallet.service';
 import { socketService } from '../socket/socket.service';
+import {
+  isValidAadhaar,
+  isValidDrivingLicense,
+  normalizeAadhaar,
+  normalizeDrivingLicense,
+} from '../../utils/document-validators';
 
 export class DriversService {
   async getDriverByUserId(userId: string) {
@@ -397,15 +403,35 @@ export class DriversService {
       data.personaType === 'VEHICLE_ONLY' ||
       driver.personaType === 'RENTAL';
 
+    let normLicense: string | undefined;
+    if (data.licenseNumber) {
+      normLicense = normalizeDrivingLicense(data.licenseNumber);
+      if (!isValidDrivingLicense(normLicense)) {
+        const err: any = new Error('Invalid driving licence format (e.g. TN0120230001234 or TN-01-2023-0001234)');
+        err.statusCode = 400;
+        throw err;
+      }
+    }
+
+    let normAadhaar: string | undefined;
+    if (data.aadharNumber) {
+      normAadhaar = normalizeAadhaar(data.aadharNumber);
+      if (!isValidAadhaar(normAadhaar)) {
+        const err: any = new Error('Invalid Aadhaar number format or checksum');
+        err.statusCode = 400;
+        throw err;
+      }
+    }
+
     const updated = await prisma.driverProfile.update({
       where: { userId },
       data: {
         ...(normalizedPersona ? { personaType: normalizedPersona } : {}),
-        ...(data.licenseNumber ? { licenseNumber: data.licenseNumber } : {}),
+        ...(normLicense ? { licenseNumber: normLicense } : {}),
         ...(data.licenseExpiry ? { licenseExpiry: data.licenseExpiry } : {}),
         ...(data.licenseFront ? { licenseFront: data.licenseFront } : {}),
         ...(data.licenseBack ? { licenseBack: data.licenseBack } : {}),
-        ...(data.aadharNumber ? { aadharNumber: data.aadharNumber } : {}),
+        ...(normAadhaar ? { aadharNumber: normAadhaar } : {}),
         ...(data.aadharFront ? { aadharFront: data.aadharFront } : {}),
         ...(data.aadharBack ? { aadharBack: data.aadharBack } : {}),
         ...(data.panNumber ? { panNumber: data.panNumber } : {}),

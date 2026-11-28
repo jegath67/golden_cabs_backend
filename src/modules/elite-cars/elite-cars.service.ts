@@ -8,7 +8,30 @@ import {
 } from '../../generated/prisma/client';
 
 const ACTIVE_RIDE_STATUSES = ['ACCEPTED', 'EN_ROUTE', 'ARRIVED', 'ONGOING'] as const;
-const DEFAULT_COVER_IMAGE = 'assets/images/all_vehicles/Ferrari-4.jpg';
+const DEFAULT_COVER_IMAGE = 'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169253/golden_cabs/vehicles/veh_elite_ferrari_cover.jpg';
+
+function getDefaultVehicleImage(brand?: string, model?: string, category?: string): string {
+  const b = (brand || '').toLowerCase();
+  const m = (model || '').toLowerCase();
+  if (b.includes('audi') || m.includes('audi')) return 'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169245/golden_cabs/vehicles/veh_elite_audi_cover.jpg';
+  if (b.includes('bmw') || m.includes('bmw')) return 'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169248/golden_cabs/vehicles/veh_elite_bmw_cover.jpg';
+  if (b.includes('rolls') || m.includes('rolls') || m.includes('ghost')) return 'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169257/golden_cabs/vehicles/veh_elite_rolls_cover.jpg';
+  if (b.includes('ferrari') || m.includes('ferrari')) return 'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169253/golden_cabs/vehicles/veh_elite_ferrari_cover.jpg';
+  if (b.includes('fiat') || m.includes('fiat')) return 'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169382/golden_cabs/vehicles/veh_fiat_real.jpg';
+  if (b.includes('land') || b.includes('rover') || m.includes('defender') || b.includes('mg') || m.includes('hector')) {
+    return 'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169384/golden_cabs/vehicles/veh_hector_real.jpg';
+  }
+  if (b.includes('nissan') || m.includes('nissan')) return 'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169381/golden_cabs/vehicles/veh_nissan_real.jpg';
+  if (b.includes('suzuki') || b.includes('maruti') || m.includes('swift') || m.includes('dzire') || m.includes('ertiga')) {
+    return 'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169259/golden_cabs/vehicles/veh_swift_real.jpg';
+  }
+  if (b.includes('toyota') || m.includes('toyota') || m.includes('mirai') || m.includes('sequoia')) {
+    return 'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169383/golden_cabs/vehicles/veh_mirai_real.jpg';
+  }
+  return category === 'LUXURY'
+    ? 'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169253/golden_cabs/vehicles/veh_elite_ferrari_cover.jpg'
+    : 'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169259/golden_cabs/vehicles/veh_swift_real.jpg';
+}
 
 function parseSeatCount(seats: unknown): number {
   if (typeof seats === 'number' && Number.isFinite(seats) && seats > 0) {
@@ -137,7 +160,8 @@ export class EliteCarsService {
 
     const photos: Array<{ photoUrl: string; tag: string | null }> = Array.isArray(v.photos) ? v.photos : [];
     const coverEntry = photos.find((p) => p.tag === 'cover') ?? photos[0];
-    const mainPhoto = coverEntry?.photoUrl || DEFAULT_COVER_IMAGE;
+    const defaultCover = getDefaultVehicleImage(v.brand, v.model, v.category);
+    const mainPhoto = coverEntry?.photoUrl || defaultCover;
     const extraGallery = photos.filter((p) => p.tag !== 'cover').map((p) => p.photoUrl);
     const gallery = extraGallery.length > 0 ? extraGallery : [mainPhoto];
 
@@ -434,11 +458,11 @@ export class EliteCarsService {
         rating: 4.9,
         status: 'AVAILABLE',
         category: 'Luxury',
-        image: 'assets/images/all_vehicles/Ferrari-4.jpg',
+        image: 'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169253/golden_cabs/vehicles/veh_elite_ferrari_cover.jpg',
         gallery: [
-          'assets/images/all_vehicles/Ferrari-4.jpg',
-          'assets/images/all_vehicles/Jaguar-F-1.jpg',
-          'assets/images/all_vehicles/Jeep-3.jpg',
+          'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169249/golden_cabs/vehicles/veh_elite_ferrari_1.jpg',
+          'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169251/golden_cabs/vehicles/veh_elite_ferrari_2.jpg',
+          'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169252/golden_cabs/vehicles/veh_elite_ferrari_3.jpg',
         ],
         speed: '340 km/h',
         seats: '2 Seats',
@@ -454,11 +478,11 @@ export class EliteCarsService {
         rating: 4.9,
         status: 'BOOKED',
         category: 'Luxury',
-        image: 'assets/images/all_vehicles/Rolls-Royce-3.jpg',
+        image: 'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169257/golden_cabs/vehicles/veh_elite_rolls_cover.jpg',
         gallery: [
-          'assets/images/all_vehicles/Rolls-Royce-3.jpg',
-          'assets/images/all_vehicles/Toyota-Mirai1.jpg',
-          'assets/images/all_vehicles/Toyota-Sequoia-4.jpg',
+          'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169254/golden_cabs/vehicles/veh_elite_rolls_1.jpg',
+          'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169255/golden_cabs/vehicles/veh_elite_rolls_2.jpg',
+          'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169256/golden_cabs/vehicles/veh_elite_rolls_3.jpg',
         ],
         speed: '250 km/h',
         seats: '4 Seats',
@@ -474,11 +498,11 @@ export class EliteCarsService {
         rating: 4.8,
         status: 'MAINTENANCE',
         category: 'Luxury',
-        image: 'assets/images/all_vehicles/BMW-X5_M_4.jpg',
+        image: 'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169248/golden_cabs/vehicles/veh_elite_bmw_cover.jpg',
         gallery: [
-          'assets/images/all_vehicles/BMW-X5_M_4.jpg',
-          'assets/images/all_vehicles/BMW-X3_M_1.jpg',
-          'assets/images/all_vehicles/Land_Rover-Defender_1.jpg',
+          'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169246/golden_cabs/vehicles/veh_elite_bmw_1.jpg',
+          'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169246/golden_cabs/vehicles/veh_elite_bmw_2.jpg',
+          'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169247/golden_cabs/vehicles/veh_elite_bmw_3.jpg',
         ],
         speed: '290 km/h',
         seats: '5 Seats',
@@ -494,11 +518,11 @@ export class EliteCarsService {
         rating: 4.7,
         status: 'AVAILABLE',
         category: 'Luxury',
-        image: 'assets/images/all_vehicles/Audi-Q7_1.jpg',
+        image: 'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169245/golden_cabs/vehicles/veh_elite_audi_cover.jpg',
         gallery: [
-          'assets/images/all_vehicles/Audi-Q7_1.jpg',
-          'assets/images/all_vehicles/Fiat-1.jpg',
-          'assets/images/all_vehicles/Kia-1.jpg',
+          'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169240/golden_cabs/vehicles/veh_elite_audi_1.jpg',
+          'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169242/golden_cabs/vehicles/veh_elite_audi_2.jpg',
+          'https://res.cloudinary.com/d6iydkb3/image/upload/v1795169244/golden_cabs/vehicles/veh_elite_audi_3.jpg',
         ],
         speed: '250 km/h',
         seats: '7 Seats',

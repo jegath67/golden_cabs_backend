@@ -1,5 +1,6 @@
 import { prisma } from '../../config/prisma';
 import { getFirebaseMessaging } from '../../config/firebase';
+import { socketService } from '../socket/socket.service';
 
 export interface SendNotificationInput {
   userId: string;
@@ -638,13 +639,20 @@ export class NotificationsService {
     type?: string;
     data?: Record<string, string>;
   }) {
-    return this.sendAudienceNotification({
+    const res = await this.sendAudienceNotification({
       audience: 'admin',
       title,
       message,
       type,
       data,
     });
+    try {
+      socketService.getIO()?.to('admin_live_fleet').emit('admin_badges_updated', {
+        type,
+        timestamp: Date.now(),
+      });
+    } catch (_) {}
+    return res;
   }
 }
 

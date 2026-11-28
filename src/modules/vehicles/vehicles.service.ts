@@ -332,9 +332,23 @@ export class VehiclesService {
 
         if (found.assignedDriver) {
           previousDriver = found.assignedDriver;
-          // Automatically put driver off shift when vehicle is unassigned
+        }
+
+        // Comprehensive unassignment: disconnect any drivers linked via relation or assignedVehicleId
+        const linkedDrivers = await tx.driverProfile.findMany({
+          where: {
+            OR: [
+              ...(found.assignedDriver ? [{ id: found.assignedDriver.id }] : []),
+              { assignedVehicleId: vehicleId },
+            ],
+          },
+          include: { user: true },
+        });
+
+        for (const d of linkedDrivers) {
+          if (!previousDriver) previousDriver = d;
           await tx.driverProfile.update({
-            where: { id: found.assignedDriver.id },
+            where: { id: d.id },
             data: {
               assignedVehicleId: null,
               vehicleAssignedAt: null,
@@ -344,6 +358,12 @@ export class VehiclesService {
             },
           });
         }
+
+        // Turn vehicle offline upon unassignment
+        await tx.vehicle.update({
+          where: { id: vehicleId },
+          data: { isOnline: false },
+        });
 
         // Return updated vehicle where assignedDriver relation is now cleanly disconnected
         return tx.vehicle.findUnique({

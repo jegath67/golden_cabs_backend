@@ -2103,6 +2103,86 @@ export class AdminController {
       });
     }
   }
+
+  /**
+   * Returns aggregated pending / new-request counts for Admin Panel sidebar badges.
+   */
+  async getSidebarBadges(req: FastifyRequest, reply: FastifyReply) {
+    try {
+      const nowMs = Date.now();
+      const [
+        searchingRides,
+        pendingDrivers,
+        pendingVehicles,
+        pendingVehicleRequests,
+        driverPayoutsCount,
+        refundsCount,
+        helpCount,
+      ] = await Promise.all([
+        prisma.ride.findMany({
+          where: { status: 'SEARCHING' },
+          select: { id: true, driverId: true, createdAt: true, stops: true },
+        }),
+        prisma.driverProfile.count({ where: { approvalStatus: 'PENDING' } }),
+        prisma.vehicle.count({ where: { status: 'PENDING' } }),
+        prisma.vehicleRequest.count({ where: { status: 'PENDING' } }).catch(() => 0),
+        prisma.walletTransaction.count({
+          where: { type: 'WITHDRAWAL', status: 'PENDING' },
+        }),
+        prisma.refundRequest.count({
+          where: { status: { in: ['SUBMITTED', 'UNDER_REVIEW'] } },
+        }),
+        prisma
+          .$queryRawUnsafe<Array<{ open: bigint | number }>>(
+            `SELECT COUNT(*) as open FROM "SupportTicket" WHERE "status" = 'Open'`
+          )
+          .then((rows) => Number(rows?.[0]?.open || 0))
+          .catch(() => 0),
+      ]);
+
+      const bookingsCount = searchingRides.filter((r) => {
+        const meta = (r.stops as any) || {};
+        const isScheduled = !!meta.isScheduled && !!meta.scheduledAt;
+        const assignmentExpiresAtMs = meta.assignmentExpiresAt
+          ? new Date(meta.assignmentExpiresAt).getTime()
+          : null;
+        const isAssignmentExpired =
+          assignmentExpiresAtMs !== null &&
+          !isNaN(assignmentExpiresAtMs) &&
+          assignmentExpiresAtMs <= nowMs;
+        const isPendingOver30Mins =
+          isScheduled &&
+          !r.driverId &&
+          r.createdAt &&
+          nowMs - new Date(r.createdAt).getTime() >= 30 * 60 * 1000;
+
+        if (isPendingOver30Mins) return false;
+        return !r.driverId || isAssignmentExpired;
+      }).length;
+
+      const approvalsCount =
+        pendingDrivers + pendingVehicles + pendingVehicleRequests;
+      const paymentsCount = driverPayoutsCount + refundsCount;
+
+      return reply.send({
+        success: true,
+        data: {
+          bookings: bookingsCount,
+          approvals: approvalsCount,
+          payments: paymentsCount,
+          driverPayouts: driverPayoutsCount,
+          refunds: refundsCount,
+          help: helpCount,
+        },
+      });
+    } catch (error: any) {
+      req.log.error(error);
+      return reply.status(500).send({
+        success: false,
+        message: error.message || 'Failed to fetch sidebar badge counts',
+      });
+    }
+  }
 }
 
 export const adminController = new AdminController();
