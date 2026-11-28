@@ -8,6 +8,7 @@ import { driverAvailabilityService } from './driver-availability.service';
 import { TripStatus } from '../../generated/prisma/client';
 import { socketService } from '../socket/socket.service';
 import { standardizeTripType } from '../../utils/trip-type.helper';
+import { resolveRideIsElite } from '../../utils/ride-category.helper';
 import {
   pricingSlabsService,
   computeCommissionSplit,
@@ -196,12 +197,12 @@ export class RidesService {
     const clientDist = typeof data.distanceKm === 'number' && data.distanceKm > 0 ? Number(data.distanceKm.toFixed(1)) : undefined;
     const seatCapPre = data.seatCapacity || (data.requestedSeats?.includes('6') || data.requestedVehicle?.includes('6') ? 6 : 4);
     const reqVehiclePre = data.requestedVehicle || data.requestedSeats || data.carName || (seatCapPre === 6 ? '6 Seater Cab' : '4 Seater Cab');
-    const isElitePre = !!(
-      data.isElite === true ||
-      String(data.category).toUpperCase() === 'ELITE' ||
-      String(reqVehiclePre).toLowerCase().includes('elite') ||
-      String(data.carName).toLowerCase().includes('elite')
-    );
+    const isElitePre = resolveRideIsElite({
+      isElite: data.isElite,
+      category: data.category,
+      requestedVehicle: reqVehiclePre,
+      carName: data.carName,
+    });
 
     const fareEstimate = await this.estimateFare({
       pickupLat: data.pickupLat,
@@ -422,12 +423,12 @@ export class RidesService {
       tripType: data.tripType,
       distanceKm: finalDistanceKm,
     });
-    const isElite = !!(
-      data.isElite === true ||
-      String(data.category).toUpperCase() === 'ELITE' ||
-      String(reqVehicle).toLowerCase().includes('elite') ||
-      String(data.carName).toLowerCase().includes('elite')
-    );
+    const isElite = resolveRideIsElite({
+      isElite: data.isElite,
+      category: data.category,
+      requestedVehicle: reqVehicle,
+      carName: data.carName,
+    });
 
     // Snapshot the active PricingSlab commission % determined at ride creation so future slab updates never mutate this ride.
     const initialCommissionSplit = computeCommissionSplit(
@@ -436,10 +437,11 @@ export class RidesService {
     );
 
     const ride = await prisma.$transaction(async (tx) => {
-      // Atomic concurrency guard for immediate bookings:
+      // Atomic concurrency guard for immediate normal (non-Elite) 4/6-seater bookings:
       // Acquire fixed two-integer PostgreSQL transaction-scoped advisory lock before
       // evaluating category availability + open SEARCHING demand.
-      if (!isScheduledBooking && !data.skipAvailabilityCheck) {
+      // Luxury (Elite) fleet requests are dispatched via Admin and skip normal 4/6-seater checks.
+      if (!isScheduledBooking && !data.skipAvailabilityCheck && !isElite) {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(202611, 1)`;
 
         const avail = await driverAvailabilityService.checkCategoryAvailability({
@@ -563,6 +565,8 @@ export class RidesService {
         dropLocation: data.dropLocation,
         totalFare: String(finalEstimatedFare),
         isScheduled: String(isScheduledBooking),
+        isElite: String(isElite),
+        category: isElite ? 'ELITE' : (data.category || 'REGULAR'),
       },
     }).catch((e) => console.error('Admin ride creation notification error:', e));
 
@@ -1752,12 +1756,13 @@ export class RidesService {
       tripType: r.tripType,
       distanceKm: r.distanceKm,
     });
-    const isElite = !!(
-      meta.isElite ||
-      meta.category === 'ELITE' ||
-      meta.requestedVehicle?.toLowerCase().includes('elite') ||
-      r.tripType?.toLowerCase().includes('elite')
-    );
+    const isElite = resolveRideIsElite({
+      isElite: meta.isElite,
+      category: meta.category,
+      requestedVehicle: meta.requestedVehicle,
+      carName: meta.carName,
+      tripType: r.tripType,
+    });
     const txMap = await getLedgerTxMapForRides([r.id]);
     const breakdown = resolveDriverRideBreakdown(r, txMap.get(r.id));
     const latestGatewayTx = r.paymentTransactions?.[0] || null;
@@ -1799,12 +1804,13 @@ export class RidesService {
         tripType: r.tripType,
         distanceKm: r.distanceKm,
       });
-      const isElite = !!(
-        meta.isElite ||
-        meta.category === 'ELITE' ||
-        meta.requestedVehicle?.toLowerCase().includes('elite') ||
-        r.tripType?.toLowerCase().includes('elite')
-      );
+      const isElite = resolveRideIsElite({
+        isElite: meta.isElite,
+        category: meta.category,
+        requestedVehicle: meta.requestedVehicle,
+        carName: meta.carName,
+        tripType: r.tripType,
+      });
       return {
         ...r,
         tripType: finalTripType,
@@ -1850,12 +1856,13 @@ export class RidesService {
         tripType: safeRide.tripType,
         distanceKm: safeRide.distanceKm,
       });
-      const isElite = !!(
-        meta.isElite ||
-        meta.category === 'ELITE' ||
-        meta.requestedVehicle?.toLowerCase().includes('elite') ||
-        safeRide.tripType?.toLowerCase().includes('elite')
-      );
+      const isElite = resolveRideIsElite({
+        isElite: meta.isElite,
+        category: meta.category,
+        requestedVehicle: meta.requestedVehicle,
+        carName: meta.carName,
+        tripType: safeRide.tripType,
+      });
       const breakdown = resolveDriverRideBreakdown(safeRide, txMap.get(safeRide.id));
 
       return {
@@ -1978,12 +1985,13 @@ export class RidesService {
         tripType: r.tripType,
         distanceKm: r.distanceKm,
       });
-      const isElite = !!(
-        meta.isElite ||
-        meta.category === 'ELITE' ||
-        meta.requestedVehicle?.toLowerCase().includes('elite') ||
-        r.tripType?.toLowerCase().includes('elite')
-      );
+      const isElite = resolveRideIsElite({
+        isElite: meta.isElite,
+        category: meta.category,
+        requestedVehicle: meta.requestedVehicle,
+        carName: meta.carName,
+        tripType: r.tripType,
+      });
       const breakdown = resolveDriverRideBreakdown(r, txMap.get(r.id));
 
       return {

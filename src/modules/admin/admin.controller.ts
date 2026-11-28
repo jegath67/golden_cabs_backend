@@ -111,12 +111,18 @@ function formatRideResponse(r: any) {
     tripType: r.tripType,
     distanceKm: r.distanceKm,
   });
-  const isElite = !!(
-    meta.isElite ||
-    meta.category === 'ELITE' ||
-    meta.requestedVehicle?.toLowerCase().includes('elite') ||
-    r.tripType?.toLowerCase().includes('elite')
-  );
+  const isExplicitBudget =
+    meta.isElite === false ||
+    String(meta.category || '').toUpperCase() === 'BUDGET';
+  const isElite = isExplicitBudget
+    ? false
+    : !!(
+        meta.isElite ||
+        meta.category === 'ELITE' ||
+        meta.category === 'LUXURY' ||
+        meta.requestedVehicle?.toLowerCase().includes('elite') ||
+        r.tripType?.toLowerCase().includes('elite')
+      );
 
   const fareNum = r.fareBreakdown?.totalFare ?? r.estimatedFare ?? 0;
   const distNum = r.distanceKm ?? 0;

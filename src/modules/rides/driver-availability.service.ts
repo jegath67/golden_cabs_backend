@@ -1,6 +1,7 @@
 import { prisma } from '../../config/prisma';
 import type { Prisma } from '../../generated/prisma/client';
 import { standardizeTripType, StandardizedTripType } from '../../utils/trip-type.helper';
+import { resolveRideIsElite, isVehicleLuxury } from '../../utils/ride-category.helper';
 import { unavailabilityService } from '../unavailability/unavailability.service';
 import { vehiclesService } from '../vehicles/vehicles.service';
 
@@ -180,12 +181,13 @@ export class DriverAvailabilityService {
       }
     }
 
-    const isElite = !!(
-      meta.isElite ||
-      meta.category === 'ELITE' ||
-      meta.requestedVehicle?.toLowerCase().includes('elite') ||
-      ride.tripType?.toLowerCase().includes('elite')
-    );
+    const isElite = resolveRideIsElite({
+      isElite: meta.isElite,
+      category: meta.category,
+      requestedVehicle: meta.requestedVehicle,
+      carName: meta.carName,
+      tripType: ride.tripType,
+    });
 
     const seatCap = meta.seatCapacity || (meta.requestedSeats?.includes('6') || meta.requestedVehicle?.includes('6') ? 6 : 4);
 
@@ -317,9 +319,11 @@ export class DriverAvailabilityService {
     }
 
     // Check Elite / Luxury Category Match
+    const isVehLuxury = isVehicleLuxury(effectiveVehicle);
+
     if (targetRide.isElite) {
       const isVehElite =
-        effectiveVehicle.category === 'LUXURY' ||
+        isVehLuxury ||
         effectiveVehicle.category === 'PREMIUM' ||
         effectiveVehicle.brand.toLowerCase().includes('bmw') ||
         effectiveVehicle.brand.toLowerCase().includes('mercedes') ||
@@ -335,6 +339,14 @@ export class DriverAvailabilityService {
           vehicle: effectiveVehicle,
         });
       }
+    } else if (isVehLuxury) {
+      return wrap({
+        isAvailable: false,
+        reasonCode: 'CATEGORY_MISMATCH',
+        reasonMessage: 'Luxury vehicle is reserved for Elite bookings and cannot be assigned to normal 4/6-Seater rides.',
+        driver,
+        vehicle: effectiveVehicle,
+      });
     }
 
     // 3. Unavailability Schedule Guard (Immediate & Scheduled)
@@ -798,6 +810,7 @@ export class DriverAvailabilityService {
         },
         select: {
           id: true,
+          tripType: true,
           stops: true,
         },
       });
@@ -811,6 +824,15 @@ export class DriverAvailabilityService {
           !!meta.isScheduled ||
           (typeof meta.scheduledAt === 'string' && meta.scheduledAt.trim().length > 0);
         if (rIsScheduled) continue;
+
+        const rIsElite = resolveRideIsElite({
+          isElite: meta.isElite,
+          category: meta.category,
+          requestedVehicle: meta.requestedVehicle,
+          carName: meta.carName,
+          tripType: r.tripType,
+        });
+        if (rIsElite) continue;
 
         const rSeatCap = Number(meta.seatCapacity) || (
           String(meta.requestedSeats || meta.requestedVehicle || '').includes('6') ? 6 : 4
